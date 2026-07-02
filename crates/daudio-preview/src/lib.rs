@@ -132,6 +132,54 @@ fn list_input_devices() -> Result<()> {
     Ok(())
 }
 
+/// Interactively prompt the user to pick an input device from a numbered list,
+/// defaulting to the host's default input. Returns the chosen device name, or
+/// `None` if there are no input devices. Reads a line from stdin.
+///
+/// Useful for a plugin's standalone binary, which can inject the result as
+/// `--input-device <name>` so the mic actually feeds the plugin.
+pub fn choose_input_device() -> Option<String> {
+    let host = cpal::default_host();
+    let names: Vec<String> = host
+        .input_devices()
+        .ok()?
+        .map(|d| d.name().unwrap_or_else(|_| "<unknown>".into()))
+        .collect();
+    if names.is_empty() {
+        return None;
+    }
+    let default_name = host.default_input_device().and_then(|d| d.name().ok());
+    let default_idx = default_name
+        .as_ref()
+        .and_then(|dn| names.iter().position(|n| n == dn))
+        .unwrap_or(0);
+
+    println!("Select an input device:");
+    for (i, name) in names.iter().enumerate() {
+        let mark = if i == default_idx { "  (default)" } else { "" };
+        println!("  [{i}] {name}{mark}");
+    }
+    print!("Enter number (or press Enter for default): ");
+    let _ = std::io::Write::flush(&mut std::io::stdout());
+
+    let mut line = String::new();
+    let idx = if std::io::stdin().read_line(&mut line).is_ok() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            default_idx
+        } else {
+            trimmed
+                .parse::<usize>()
+                .ok()
+                .filter(|&i| i < names.len())
+                .unwrap_or(default_idx)
+        }
+    } else {
+        default_idx
+    };
+    Some(names[idx].clone())
+}
+
 /// Live analysis: capture from an input device (the default, or `device_name`)
 /// and print emitted MIDI notes in real time until the user presses Enter.
 fn analyze_live<A>(device_name: Option<&str>) -> Result<()>
