@@ -1,2 +1,5 @@
 [filter]
 name = "daudio Filter"
+
+[synth]
+name = "daudio Synth"
