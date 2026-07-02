@@ -92,12 +92,11 @@ fn quantize(midi_note: i32, root: u8, degree_mask: u16) -> Option<i32>
 - **Retrigger:** when the committed note changes → note-off (old) then note-on
   (new); on gate-close → note-off.
 
-**Real-time caveat:** the `pitch-detection` detector reuses preallocated buffers
-but its `get_pitch` runs an FFT and collects peak vectors, so it may allocate.
-For v1 detection runs inline on the audio thread once per hop (infrequent); if
-this causes xruns, the documented follow-up is to move detection to a worker
-thread fed by a lock-free ring buffer. The quantizer and trigger are allocation-
-free.
+**Real-time safety:** detection now runs on a dedicated worker thread. The audio
+thread only pushes samples into a lock-free ring (`rtrb`) and reads the latest
+published frequency via an atomic, so it is strictly RT-safe — the possibly
+allocating `get_pitch` FFT never runs on the audio thread. The quantizer and
+trigger are allocation-free.
 
 ## Parameters & UI
 
