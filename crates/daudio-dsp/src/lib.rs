@@ -1,6 +1,7 @@
 //! daudio-dsp: pure, host-agnostic DSP primitives.
 
 pub mod gain;
+pub mod processor;
 
 #[cfg(test)]
 mod smoke {
