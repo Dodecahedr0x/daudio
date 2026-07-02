@@ -3,6 +3,11 @@
 use crate::processor::Processor;
 use std::f32::consts::PI;
 
+/// RBJ cookbook lowpass biquad filter.
+///
+/// The constructor uses a 48 kHz default sample rate. Callers MUST call
+/// [`BiquadLowpass::set_sample_rate`] before processing (plugins do this in
+/// their `initialize` callback) so coefficients match the host rate.
 pub struct BiquadLowpass {
     sample_rate: f32,
     cutoff_hz: f32,
@@ -12,11 +17,16 @@ pub struct BiquadLowpass {
     b2: f32,
     a1: f32,
     a2: f32,
+    // TODO(denormals): IIR filter state (z1/z2) can accumulate denormal
+    // values on some platforms, which may cause CPU spikes. Flushing to zero
+    // may be added later if profiling shows it is a problem.
     z1: f32,
     z2: f32,
 }
 
 impl BiquadLowpass {
+    /// Construct with a 48 kHz default sample rate. Callers MUST call
+    /// [`BiquadLowpass::set_sample_rate`] before processing.
     pub fn new(cutoff_hz: f32, q: f32) -> Self {
         let mut f = Self {
             sample_rate: 48_000.0,
@@ -43,7 +53,8 @@ impl BiquadLowpass {
         let cutoff = self.cutoff_hz.clamp(10.0, self.sample_rate * 0.49);
         let w0 = 2.0 * PI * cutoff / self.sample_rate;
         let (sin_w0, cos_w0) = w0.sin_cos();
-        let alpha = sin_w0 / (2.0 * self.q);
+        let q = self.q.max(1e-3);
+        let alpha = sin_w0 / (2.0 * q);
 
         let b0 = (1.0 - cos_w0) / 2.0;
         let b1 = 1.0 - cos_w0;
@@ -107,6 +118,14 @@ mod tests {
             }
         }
         assert!(peak < 0.1, "high freq not attenuated: {peak}");
+    }
+
+    #[test]
+    fn q_zero_does_not_produce_nan() {
+        let mut f = BiquadLowpass::new(1000.0, 0.0);
+        f.set_sample_rate(48_000.0);
+        let out = f.process_sample(1.0);
+        assert!(out.is_finite(), "q=0 produced non-finite output: {out}");
     }
 
     #[test]
