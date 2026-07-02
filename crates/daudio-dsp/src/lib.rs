@@ -2,6 +2,7 @@
 
 pub mod gain;
 pub mod processor;
+pub mod smoother;
 
 #[cfg(test)]
 mod smoke {
