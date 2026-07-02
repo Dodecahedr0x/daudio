@@ -2,6 +2,7 @@
 
 pub mod biquad;
 pub mod gain;
+pub mod oscillator;
 pub mod processor;
 pub mod smoother;
 
