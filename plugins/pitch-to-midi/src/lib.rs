@@ -6,11 +6,14 @@ use daudio_dsp::notes;
 use daudio_dsp::pitch::{Detection, PitchTracker, HOP};
 use daudio_sdk::prelude::*;
 use daudio_ui::nih_plug_vizia;
+use daudio_ui::nih_plug_vizia::assets::fonts;
+use daudio_ui::nih_plug_vizia::vizia::vg;
+use daudio_ui::nih_plug_vizia::widgets::param_base::ParamWidgetBase;
 use daudio_ui::nih_plug_vizia::widgets::{ParamSlider, RawParamEvent};
 use daudio_ui::prelude::*;
+use std::cell::Cell;
 use std::sync::atomic::{AtomicI32, Ordering::Relaxed};
 use std::sync::Arc;
-use std::time::Duration;
 use trigger::{NoteAction, Trigger};
 
 /// Root pitch-class, as a host-automatable enum parameter.
@@ -282,11 +285,6 @@ const PRESETS: &[(&str, &[u8])] = &[
     ("Clear", &[]),
 ];
 
-/// Refresh interval for the note readout (~20 fps). The readout reads plain
-/// atomics, so — like the [`daudio_ui::Meter`] — it needs a repaint/refresh
-/// driver; here a timer re-reads the atomics into a bound label.
-const READOUT_INTERVAL: Duration = Duration::from_millis(50);
-
 /// Write a preset pattern to the twelve degree params via `RawParamEvent`s,
 /// which the wrapper's root `ParamModel` turns into host-visible automation.
 fn apply_preset(cx: &mut EventContext, params: &PitchToMidiParams, degrees: &[u8]) {
@@ -315,57 +313,80 @@ fn apply_preset(cx: &mut EventContext, params: &PitchToMidiParams, degrees: &[u8
     }
 }
 
-/// The editor's reactive model. Vizia stores never change unless mutated inside
-/// an event handler, so a ~50 ms timer emits [`ReadoutEvent::Tick`] and this
-/// model re-reads, on each tick, both the shared `detected`/`output` atoms (into
-/// the `text` readout) and — crucially — the current root pitch class (into
-/// `root`).
+/// A leaf view that renders the current input/output note names.
 ///
-/// `root_pitch` is what makes the note-toggle captions relabel live: the twelve
-/// toggles' captions `Binding` on the [`Readout::root_pitch`] lens, and because
-/// that is a genuine tracked store (unlike a `.map` over the never-changing
-/// params `Arc`), the binding re-runs whenever the value changes — within one
-/// timer interval of the user moving the root selector. (The field can't be
-/// named `root`: vizia's `Lens` derive reserves that for the whole-struct lens.)
-#[derive(Lens)]
-struct Readout {
+/// Modelled on [`daudio_ui::Meter`]: it holds shared atomics written by the
+/// audio thread and reads them directly in [`View::draw`] every frame. Under
+/// `nih_plug_vizia`'s `vizia_baseview` backend the editor redraws every frame
+/// unconditionally (and vizia timers never tick there), so a per-frame `draw`
+/// is the reliable way to reflect audio-thread state — no timer/model needed.
+struct NoteReadout {
     detected: Arc<AtomicI32>,
     output: Arc<AtomicI32>,
-    /// Params handle, read each tick for the current root.
-    params: Arc<PitchToMidiParams>,
-    /// Current root pitch class `0..=11`; the note toggles bind to this.
-    root_pitch: u8,
-    /// Formatted `in: … out: …` readout string.
-    text: String,
+    /// femtovg font id, added to the canvas lazily on first draw and cached
+    /// (adding it every frame would leak duplicate fonts).
+    font: Cell<Option<vg::FontId>>,
 }
 
-/// Event that drives the [`Readout`] to re-read its atomics and root.
-enum ReadoutEvent {
-    Tick,
-}
+impl NoteReadout {
+    /// Build a readout reading from the shared `detected`/`output` atomics.
+    fn new(cx: &mut Context, detected: Arc<AtomicI32>, output: Arc<AtomicI32>) -> Handle<'_, Self> {
+        Self {
+            detected,
+            output,
+            font: Cell::new(None),
+        }
+        .build(cx, |_| {})
+        // Default inline size so the text has room without a stylesheet.
+        .width(Pixels(200.0))
+        .height(Pixels(24.0))
+    }
 
-impl Readout {
-    /// Format `in: <note>   out: <note>`, rendering `-1` (no note) as an em dash.
-    fn format(detected: i32, output: i32) -> String {
-        let name = |m: i32| {
-            if m < 0 {
-                "—".to_string()
-            } else {
-                notes::note_name(m)
-            }
-        };
-        format!("in: {}   out: {}", name(detected), name(output))
+    /// Note name for a MIDI value, rendering `< 0` (no note) as an em dash.
+    fn name(midi: i32) -> String {
+        if midi < 0 {
+            "—".to_string()
+        } else {
+            notes::note_name(midi)
+        }
     }
 }
 
-impl Model for Readout {
-    fn event(&mut self, _cx: &mut EventContext, event: &mut Event) {
-        event.map(|e, _| match e {
-            ReadoutEvent::Tick => {
-                self.text = Readout::format(self.detected.load(Relaxed), self.output.load(Relaxed));
-                self.root_pitch = root_pc(self.params.root.value());
-            }
-        });
+impl View for NoteReadout {
+    fn element(&self) -> Option<&'static str> {
+        Some("daudio-note-readout")
+    }
+
+    fn draw(&self, cx: &mut DrawContext, canvas: &mut Canvas) {
+        let b = cx.bounds();
+        if b.w == 0.0 || b.h == 0.0 {
+            return;
+        }
+
+        // Lazily register the font on the femtovg canvas and cache its id.
+        let font = match self.font.get() {
+            Some(f) => f,
+            None => match canvas.add_font_mem(fonts::NOTO_SANS_REGULAR) {
+                Ok(f) => {
+                    self.font.set(Some(f));
+                    f
+                }
+                Err(_) => return,
+            },
+        };
+
+        let text = format!(
+            "in: {}   out: {}",
+            Self::name(self.detected.load(Relaxed)),
+            Self::name(self.output.load(Relaxed)),
+        );
+
+        let mut paint = vg::Paint::color(vg::Color::rgb(0xf0, 0xf0, 0xf4));
+        paint.set_font(&[font]);
+        paint.set_font_size(15.0);
+        paint.set_text_align(vg::Align::Center);
+        paint.set_text_baseline(vg::Baseline::Middle);
+        let _ = canvas.fill_text(b.x + b.w / 2.0, b.y + b.h / 2.0, &text, &paint);
     }
 }
 
@@ -377,29 +398,17 @@ fn build_editor(
     output: Arc<AtomicI32>,
 ) {
     // Lens giving the current root pitch class, used to caption the toggles.
-    // Backed by the reactive `Readout` model (built below onto this VStack), so
-    // the captions relabel live when the root changes — within one timer tick.
-    let root_lens = Readout::root_pitch;
+    // Built via `ParamWidgetBase::make_lens` so nih_plug refreshes it on
+    // `RawParamEvent::ParametersChanged` — the same mechanism that keeps a
+    // `ParamSlider`'s value display live. (A plain `.map` over the params `Arc`
+    // never re-fires, since the Arc pointer is stable.)
+    let root_lens = ParamWidgetBase::make_lens(
+        DaudioData::<PitchToMidiParams>::params,
+        |p| &p.root,
+        |root| root_pc(root.value()),
+    );
 
     VStack::new(cx, move |cx| {
-        // Build the reactive model onto this VStack (an ancestor of the toggles
-        // and the readout label, so both lenses resolve) and start its refresh
-        // timer, BEFORE any widget that binds to it.
-        Readout {
-            root_pitch: root_pc(params.root.value()),
-            text: Readout::format(-1, -1),
-            params: params.clone(),
-            detected,
-            output,
-        }
-        .build(cx);
-        let timer = cx.add_timer(READOUT_INTERVAL, None, |cx, action| {
-            if let TimerAction::Tick(_) = action {
-                cx.emit(ReadoutEvent::Tick);
-            }
-        });
-        cx.start_timer(timer);
-
         Label::new(cx, "daudio Pitch2MIDI").class("daudio-title");
 
         // Root selector: ParamSlider works over the `EnumParam<Root>`.
@@ -464,9 +473,10 @@ fn build_editor(
         })
         .class("daudio-row");
 
-        // Note-name readout, bound to the reactive model built above.
-        HStack::new(cx, |cx| {
-            Label::new(cx, Readout::text).class("daudio-label");
+        // Note-name readout: a draw()-based leaf reading the shared atomics
+        // every frame (baseview redraws each frame; vizia timers are inert).
+        HStack::new(cx, move |cx| {
+            NoteReadout::new(cx, detected, output);
         })
         .class("daudio-row");
     })
