@@ -37,6 +37,11 @@
   height: 56px;
 }
 
+.daudio-meter {
+  width: 16px;
+  height: 80px;
+}
+
 .daudio-row {
   width: auto;
   height: auto;
