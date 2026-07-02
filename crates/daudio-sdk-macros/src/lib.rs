@@ -3,7 +3,7 @@ use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
 use syn::parse::{Parse, ParseStream};
 use syn::punctuated::Punctuated;
-use syn::{parse_macro_input, Ident, ItemStruct, LitByteStr, LitStr, Token};
+use syn::{parse_macro_input, Ident, ItemStruct, LitBool, LitByteStr, LitStr, Token};
 
 /// Parsed contents of the `#[daudio_plugin(...)]` attribute.
 struct PluginArgs {
@@ -16,12 +16,16 @@ struct PluginArgs {
     vst3_id: LitStr,
     clap_features: Vec<Ident>,
     vst3_categories: Vec<Ident>,
+    /// When true, generate a SYNTH (MIDI) `Plugin` impl delegating to
+    /// `DaudioSynth`; otherwise the effect impl delegating to `DaudioEffect`.
+    midi: bool,
 }
 
 /// A single `key = value` entry in the attribute list. `value` is either a
-/// string literal or a bracketed list of idents.
+/// string literal, a boolean literal, or a bracketed list of idents.
 enum ArgValue {
     Str(LitStr),
+    Bool(LitBool),
     Idents(Vec<Ident>),
 }
 
@@ -40,6 +44,8 @@ impl Parse for Arg {
             let idents: Punctuated<Ident, Token![,]> =
                 content.parse_terminated(Ident::parse, Token![,])?;
             ArgValue::Idents(idents.into_iter().collect())
+        } else if input.peek(syn::LitBool) {
+            ArgValue::Bool(input.parse()?)
         } else {
             ArgValue::Str(input.parse()?)
         };
@@ -60,6 +66,7 @@ impl Parse for PluginArgs {
         let mut vst3_id = None;
         let mut clap_features = None;
         let mut vst3_categories = None;
+        let mut midi = None;
 
         for arg in args {
             let key = arg.key;
@@ -88,6 +95,7 @@ impl Parse for PluginArgs {
                 ("vst3_id", ArgValue::Str(s)) => assign!(vst3_id, s),
                 ("clap_features", ArgValue::Idents(v)) => assign!(clap_features, v),
                 ("vst3_categories", ArgValue::Idents(v)) => assign!(vst3_categories, v),
+                ("midi", ArgValue::Bool(b)) => assign!(midi, b.value()),
                 (other, _) => {
                     return Err(syn::Error::new(
                         key.span(),
@@ -126,6 +134,7 @@ impl Parse for PluginArgs {
                     "`daudio_plugin` requires a `vst3_categories` key",
                 )
             })?,
+            midi: midi.unwrap_or(false),
         })
     }
 }
@@ -159,6 +168,7 @@ pub fn daudio_plugin(attr: TokenStream, item: TokenStream) -> TokenStream {
         vst3_id,
         clap_features,
         vst3_categories,
+        midi,
     } = args;
 
     let url_ts: TokenStream2 = match &url {
@@ -183,77 +193,175 @@ pub fn daudio_plugin(attr: TokenStream, item: TokenStream) -> TokenStream {
 
     let vst3_id_bytes = LitByteStr::new(vst3_id_value.as_bytes(), vst3_id.span());
 
+    // The `Plugin` impl differs between effects (stereo in/out, delegating to
+    // `DaudioEffect`) and synths (MIDI-in, no audio input, stereo out,
+    // delegating to `DaudioSynth`). Everything else (Clap/Vst3/exports) is
+    // identical. Select the two differing halves here.
+    let plugin_impl = if midi {
+        quote! {
+            impl ::daudio_sdk::nih_plug::prelude::Plugin for #ident {
+                const NAME: &'static str = #name;
+                const VENDOR: &'static str = #vendor;
+                const URL: &'static str = #url_ts;
+                const EMAIL: &'static str = #email_ts;
+                const VERSION: &'static str = env!("CARGO_PKG_VERSION");
+
+                const AUDIO_IO_LAYOUTS: &'static [::daudio_sdk::nih_plug::prelude::AudioIOLayout] =
+                    &[::daudio_sdk::nih_plug::prelude::AudioIOLayout {
+                        main_input_channels: ::std::option::Option::None,
+                        main_output_channels: ::std::num::NonZeroU32::new(2),
+                        ..::daudio_sdk::nih_plug::prelude::AudioIOLayout::const_default()
+                    }];
+
+                const MIDI_INPUT: ::daudio_sdk::nih_plug::prelude::MidiConfig =
+                    ::daudio_sdk::nih_plug::prelude::MidiConfig::Basic;
+
+                const SAMPLE_ACCURATE_AUTOMATION: bool = true;
+
+                type SysExMessage = ();
+                type BackgroundTask = ();
+
+                fn params(&self) -> ::std::sync::Arc<dyn ::daudio_sdk::nih_plug::prelude::Params> {
+                    self.params.clone()
+                }
+
+                fn initialize(
+                    &mut self,
+                    _layout: &::daudio_sdk::nih_plug::prelude::AudioIOLayout,
+                    buffer_config: &::daudio_sdk::nih_plug::prelude::BufferConfig,
+                    _context: &mut impl ::daudio_sdk::nih_plug::prelude::InitContext<Self>,
+                ) -> bool {
+                    <Self as ::daudio_sdk::DaudioSynth>::activate(self, buffer_config.sample_rate);
+                    true
+                }
+
+                fn reset(&mut self) {
+                    <Self as ::daudio_sdk::DaudioSynth>::reset(self);
+                }
+
+                fn editor(
+                    &mut self,
+                    _async_executor: ::daudio_sdk::nih_plug::prelude::AsyncExecutor<Self>,
+                ) -> ::std::option::Option<
+                    ::std::boxed::Box<dyn ::daudio_sdk::nih_plug::prelude::Editor>,
+                > {
+                    <Self as ::daudio_sdk::DaudioSynth>::editor(self)
+                }
+
+                fn process(
+                    &mut self,
+                    buffer: &mut ::daudio_sdk::nih_plug::prelude::Buffer,
+                    _aux: &mut ::daudio_sdk::nih_plug::prelude::AuxiliaryBuffers,
+                    context: &mut impl ::daudio_sdk::nih_plug::prelude::ProcessContext<Self>,
+                ) -> ::daudio_sdk::nih_plug::prelude::ProcessStatus {
+                    <Self as ::daudio_sdk::DaudioSynth>::pre_block(self);
+
+                    let mut next_event = context.next_event();
+                    for (sample_id, mut channel_samples) in buffer.iter_samples().enumerate() {
+                        while let Some(event) = next_event {
+                            if event.timing() > sample_id as u32 {
+                                break;
+                            }
+                            match event {
+                                ::daudio_sdk::nih_plug::prelude::NoteEvent::NoteOn {
+                                    note, velocity, ..
+                                } => <Self as ::daudio_sdk::DaudioSynth>::note_on(
+                                    self, note, velocity,
+                                ),
+                                ::daudio_sdk::nih_plug::prelude::NoteEvent::NoteOff {
+                                    note, ..
+                                } => <Self as ::daudio_sdk::DaudioSynth>::note_off(self, note),
+                                _ => {}
+                            }
+                            next_event = context.next_event();
+                        }
+                        let (l, r) = <Self as ::daudio_sdk::DaudioSynth>::render_frame(self);
+                        if channel_samples.len() >= 2 {
+                            *channel_samples.get_mut(0).unwrap() = l;
+                            *channel_samples.get_mut(1).unwrap() = r;
+                        }
+                    }
+                    ::daudio_sdk::nih_plug::prelude::ProcessStatus::Normal
+                }
+            }
+        }
+    } else {
+        quote! {
+            impl ::daudio_sdk::nih_plug::prelude::Plugin for #ident {
+                const NAME: &'static str = #name;
+                const VENDOR: &'static str = #vendor;
+                const URL: &'static str = #url_ts;
+                const EMAIL: &'static str = #email_ts;
+                const VERSION: &'static str = env!("CARGO_PKG_VERSION");
+
+                const AUDIO_IO_LAYOUTS: &'static [::daudio_sdk::nih_plug::prelude::AudioIOLayout] =
+                    &[::daudio_sdk::nih_plug::prelude::AudioIOLayout {
+                        main_input_channels: ::std::num::NonZeroU32::new(2),
+                        main_output_channels: ::std::num::NonZeroU32::new(2),
+                        ..::daudio_sdk::nih_plug::prelude::AudioIOLayout::const_default()
+                    }];
+
+                const SAMPLE_ACCURATE_AUTOMATION: bool = true;
+
+                type SysExMessage = ();
+                type BackgroundTask = ();
+
+                fn params(&self) -> ::std::sync::Arc<dyn ::daudio_sdk::nih_plug::prelude::Params> {
+                    self.params.clone()
+                }
+
+                fn initialize(
+                    &mut self,
+                    _layout: &::daudio_sdk::nih_plug::prelude::AudioIOLayout,
+                    buffer_config: &::daudio_sdk::nih_plug::prelude::BufferConfig,
+                    _context: &mut impl ::daudio_sdk::nih_plug::prelude::InitContext<Self>,
+                ) -> bool {
+                    <Self as ::daudio_sdk::DaudioEffect>::activate(self, buffer_config.sample_rate);
+                    true
+                }
+
+                fn reset(&mut self) {
+                    <Self as ::daudio_sdk::DaudioEffect>::reset(self);
+                }
+
+                fn editor(
+                    &mut self,
+                    _async_executor: ::daudio_sdk::nih_plug::prelude::AsyncExecutor<Self>,
+                ) -> ::std::option::Option<
+                    ::std::boxed::Box<dyn ::daudio_sdk::nih_plug::prelude::Editor>,
+                > {
+                    <Self as ::daudio_sdk::DaudioEffect>::editor(self)
+                }
+
+                fn process(
+                    &mut self,
+                    buffer: &mut ::daudio_sdk::nih_plug::prelude::Buffer,
+                    _aux: &mut ::daudio_sdk::nih_plug::prelude::AuxiliaryBuffers,
+                    _context: &mut impl ::daudio_sdk::nih_plug::prelude::ProcessContext<Self>,
+                ) -> ::daudio_sdk::nih_plug::prelude::ProcessStatus {
+                    <Self as ::daudio_sdk::DaudioEffect>::pre_block(self);
+
+                    for mut frame in buffer.iter_samples() {
+                        if frame.len() < 2 {
+                            continue;
+                        }
+                        let l = *frame.get_mut(0).unwrap();
+                        let r = *frame.get_mut(1).unwrap();
+                        let (ol, or) =
+                            <Self as ::daudio_sdk::DaudioEffect>::process_frame(self, l, r);
+                        *frame.get_mut(0).unwrap() = ol;
+                        *frame.get_mut(1).unwrap() = or;
+                    }
+                    ::daudio_sdk::nih_plug::prelude::ProcessStatus::Normal
+                }
+            }
+        }
+    };
+
     let expanded = quote! {
         #item_struct
 
-        impl ::daudio_sdk::nih_plug::prelude::Plugin for #ident {
-            const NAME: &'static str = #name;
-            const VENDOR: &'static str = #vendor;
-            const URL: &'static str = #url_ts;
-            const EMAIL: &'static str = #email_ts;
-            const VERSION: &'static str = env!("CARGO_PKG_VERSION");
-
-            const AUDIO_IO_LAYOUTS: &'static [::daudio_sdk::nih_plug::prelude::AudioIOLayout] =
-                &[::daudio_sdk::nih_plug::prelude::AudioIOLayout {
-                    main_input_channels: ::std::num::NonZeroU32::new(2),
-                    main_output_channels: ::std::num::NonZeroU32::new(2),
-                    ..::daudio_sdk::nih_plug::prelude::AudioIOLayout::const_default()
-                }];
-
-            const SAMPLE_ACCURATE_AUTOMATION: bool = true;
-
-            type SysExMessage = ();
-            type BackgroundTask = ();
-
-            fn params(&self) -> ::std::sync::Arc<dyn ::daudio_sdk::nih_plug::prelude::Params> {
-                self.params.clone()
-            }
-
-            fn initialize(
-                &mut self,
-                _layout: &::daudio_sdk::nih_plug::prelude::AudioIOLayout,
-                buffer_config: &::daudio_sdk::nih_plug::prelude::BufferConfig,
-                _context: &mut impl ::daudio_sdk::nih_plug::prelude::InitContext<Self>,
-            ) -> bool {
-                <Self as ::daudio_sdk::DaudioEffect>::activate(self, buffer_config.sample_rate);
-                true
-            }
-
-            fn reset(&mut self) {
-                <Self as ::daudio_sdk::DaudioEffect>::reset(self);
-            }
-
-            fn editor(
-                &mut self,
-                _async_executor: ::daudio_sdk::nih_plug::prelude::AsyncExecutor<Self>,
-            ) -> ::std::option::Option<
-                ::std::boxed::Box<dyn ::daudio_sdk::nih_plug::prelude::Editor>,
-            > {
-                <Self as ::daudio_sdk::DaudioEffect>::editor(self)
-            }
-
-            fn process(
-                &mut self,
-                buffer: &mut ::daudio_sdk::nih_plug::prelude::Buffer,
-                _aux: &mut ::daudio_sdk::nih_plug::prelude::AuxiliaryBuffers,
-                _context: &mut impl ::daudio_sdk::nih_plug::prelude::ProcessContext<Self>,
-            ) -> ::daudio_sdk::nih_plug::prelude::ProcessStatus {
-                <Self as ::daudio_sdk::DaudioEffect>::pre_block(self);
-
-                for mut frame in buffer.iter_samples() {
-                    if frame.len() < 2 {
-                        continue;
-                    }
-                    let l = *frame.get_mut(0).unwrap();
-                    let r = *frame.get_mut(1).unwrap();
-                    let (ol, or) =
-                        <Self as ::daudio_sdk::DaudioEffect>::process_frame(self, l, r);
-                    *frame.get_mut(0).unwrap() = ol;
-                    *frame.get_mut(1).unwrap() = or;
-                }
-                ::daudio_sdk::nih_plug::prelude::ProcessStatus::Normal
-            }
-        }
+        #plugin_impl
 
         impl ::daudio_sdk::nih_plug::prelude::ClapPlugin for #ident {
             const CLAP_ID: &'static str = #clap_id;
