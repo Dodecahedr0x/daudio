@@ -9,10 +9,13 @@ use nih_plug::prelude::Param;
 use nih_plug_vizia::vizia::prelude::*;
 use nih_plug_vizia::vizia::vg;
 use nih_plug_vizia::widgets::param_base::ParamWidgetBase;
+use nih_plug_vizia::widgets::RawParamEvent;
 
 /// Pixels of vertical drag for a full `[0, 1]` sweep of the parameter.
 const DRAG_PIXELS_PER_RANGE: f32 = 200.0;
-/// Normalized amount changed per scroll-wheel notch.
+/// Normalized amount changed per scroll-wheel notch. Scroll is continuous-only:
+/// it does not respect discrete-parameter steps, which is fine for the current
+/// continuous params.
 const SCROLL_STEP: f32 = 0.02;
 /// The arc leaves a gap at the bottom: the sweep spans 270°, centred on the top.
 const START_ANGLE_DEG: f32 = 135.0;
@@ -80,6 +83,9 @@ impl View for Knob {
         let cy_px = bounds.y + bounds.h / 2.0;
         let stroke_width = 3.0;
         let radius = (bounds.w.min(bounds.h) / 2.0) - stroke_width;
+        if radius <= 0.0 {
+            return;
+        }
 
         // femtovg angles run clockwise from the +x axis in radians. Our sweep
         // starts at 135° and runs 270° clockwise to 405° (== 45°).
@@ -136,6 +142,7 @@ impl View for Knob {
                 let delta = (self.drag_start_y - *y) / DRAG_PIXELS_PER_RANGE;
                 let new_value = (self.drag_start_value + delta).clamp(0.0, 1.0);
                 self.param_base.set_normalized_value(cx, new_value);
+                cx.needs_redraw();
             }
             WindowEvent::MouseUp(MouseButton::Left) if self.dragging => {
                 self.dragging = false;
@@ -144,11 +151,20 @@ impl View for Knob {
                 meta.consume();
             }
             WindowEvent::MouseDoubleClick(MouseButton::Left) => {
-                // Double-click resets to the default value.
+                // Vizia sends MouseDown(Left) before MouseDoubleClick(Left), so a
+                // drag gesture is already open here. Tear it down first so we can't
+                // leave a dangling captured/begun gesture if the trailing MouseUp
+                // is dropped, then reset to the default value.
+                if self.dragging {
+                    self.dragging = false;
+                    cx.release();
+                    self.param_base.end_set_parameter(cx);
+                }
                 self.param_base.begin_set_parameter(cx);
                 self.param_base
                     .set_normalized_value(cx, self.param_base.default_normalized_value());
                 self.param_base.end_set_parameter(cx);
+                cx.needs_redraw();
                 meta.consume();
             }
             WindowEvent::MouseScroll(_scroll_x, scroll_y) if *scroll_y != 0.0 => {
@@ -157,9 +173,20 @@ impl View for Knob {
                 self.param_base.begin_set_parameter(cx);
                 self.param_base.set_normalized_value(cx, new_value);
                 self.param_base.end_set_parameter(cx);
+                cx.needs_redraw();
                 meta.consume();
             }
             _ => {}
+        });
+
+        // Host automation, preset loads, and any other external parameter change
+        // arrive as `RawParamEvent`s (delivered on idle). Repaint so the knob
+        // tracks the DAW instead of freezing at its last drawn value.
+        event.map(|param_event, _meta| match param_event {
+            RawParamEvent::ParametersChanged
+            | RawParamEvent::BeginSetParameter(_)
+            | RawParamEvent::SetParameterNormalized(_, _)
+            | RawParamEvent::EndSetParameter(_) => cx.needs_redraw(),
         });
     }
 }
