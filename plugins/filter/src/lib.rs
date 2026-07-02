@@ -35,8 +35,7 @@ impl Default for FilterParams {
                     max: 6.0,
                 },
             )
-            .with_unit(" dB")
-            .with_smoother(SmoothingStyle::Linear(20.0)),
+            .with_unit(" dB"),
         }
     }
 }
@@ -100,8 +99,16 @@ impl Plugin for FilterPlugin {
     ) -> ProcessStatus {
         self.core.set_cutoff(self.params.cutoff.value());
 
+        // FilterCore's internal OnePole smooths toward this target, so pull the
+        // param value once and let the core be the single 20 ms smoother.
+        let gain_db = self.params.gain.value();
+
         for mut frame in buffer.iter_samples() {
-            let gain_db = self.params.gain.smoothed.next();
+            // Stereo is guaranteed by AUDIO_IO_LAYOUTS; this guard prevents an
+            // RT-thread panic/UB if a host ignores the declared layout.
+            if frame.len() < 2 {
+                continue;
+            }
             let l = *frame.get_mut(0).unwrap();
             let r = *frame.get_mut(1).unwrap();
             let (ol, or) = self.core.process_frame(l, r, gain_db);
