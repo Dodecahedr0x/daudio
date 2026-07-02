@@ -2,9 +2,13 @@ pub mod dsp;
 
 use crate::dsp::FilterCore;
 use daudio_sdk::prelude::*;
+use daudio_ui::nih_plug_vizia;
+use daudio_ui::prelude::*;
 
 #[derive(Params)]
 pub struct FilterParams {
+    #[persist = "editor-state"]
+    editor_state: Arc<nih_plug_vizia::ViziaState>,
     #[id = "cutoff"]
     cutoff: FloatParam,
     #[id = "gain"]
@@ -14,6 +18,7 @@ pub struct FilterParams {
 impl Default for FilterParams {
     fn default() -> Self {
         Self {
+            editor_state: daudio_ui::editor_state(280, 180),
             cutoff: hz_param("Cutoff", 1000.0, 20.0, 20_000.0),
             gain: db_gain_param("Gain", -60.0, 6.0, 0.0),
         }
@@ -47,6 +52,23 @@ impl Default for FilterPlugin {
 
 impl DaudioEffect for FilterPlugin {
     type Params = FilterParams;
+
+    fn editor(&mut self) -> Option<Box<dyn Editor>> {
+        daudio_ui::create_editor(
+            self.params.editor_state.clone(),
+            self.params.clone(),
+            |cx| {
+                VStack::new(cx, |cx| {
+                    Label::new(cx, "daudio Filter").class("daudio-title");
+                    ParamControl::new(cx, "Cutoff", DaudioData::<FilterParams>::params, |p| {
+                        &p.cutoff
+                    });
+                    ParamControl::new(cx, "Gain", DaudioData::<FilterParams>::params, |p| &p.gain);
+                })
+                .class("daudio-panel");
+            },
+        )
+    }
 
     fn activate(&mut self, sample_rate: f32) {
         self.core.set_sample_rate(sample_rate);
