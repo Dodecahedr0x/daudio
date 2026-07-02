@@ -17,11 +17,18 @@ pub const PITCH_CLASS_NAMES: [&str; 12] = [
     "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B",
 ];
 
-/// Background when the toggle is on. `rgb(94, 139, 255)` ≈ `#5e8bff`, the suite
-/// accent (kept in sync by hand with [`crate::ACCENT`] / `theme.css`).
-const ON_COLOR: Color = Color::rgb(94, 139, 255);
-/// Background when the toggle is off — a dark neutral matching the theme.
-const OFF_COLOR: Color = Color::rgb(0x2a, 0x2a, 0x32);
+// These vizia `Color`s mirror the `theme.rs` / `theme.css` palette by hand.
+/// Background when the toggle is on — the suite `ACCENT` (`#5b8cff`).
+const ON_COLOR: Color = Color::rgb(0x5b, 0x8c, 0xff);
+/// Background when the toggle is off — the control `SURFACE` (`#2c2c38`).
+const OFF_COLOR: Color = Color::rgb(0x2c, 0x2c, 0x38);
+/// Text when on — the window `BG` (`#16161c`), dark-on-accent for punch.
+const ON_TEXT: Color = Color::rgb(0x16, 0x16, 0x1c);
+/// Text when off — `TEXT_DIM` (`#9a9ba8`).
+const OFF_TEXT: Color = Color::rgb(0x9a, 0x9b, 0xa8);
+/// Border when off — the theme `BORDER` (`#383843`); when on it matches the
+/// accent fill so the pill reads as a solid block.
+const OFF_BORDER: Color = Color::rgb(0x38, 0x38, 0x43);
 
 /// A click-to-toggle button bound to a [`BoolParam`], captioned with an absolute
 /// note name.
@@ -68,9 +75,10 @@ impl NoteToggle {
         })
         // Default inline styling so the toggle is visible and legible without a
         // stylesheet; `.daudio-note-toggle` rules can still override these.
-        .width(Pixels(34.0))
-        .height(Pixels(44.0))
+        .width(Pixels(36.0))
+        .height(Pixels(46.0))
         .child_space(Stretch(1.0))
+        .border_width(Pixels(1.0))
         // Background reflects the param's current value, live.
         .background_color(ParamWidgetBase::make_lens(
             params,
@@ -80,6 +88,30 @@ impl NoteToggle {
                     ON_COLOR
                 } else {
                     OFF_COLOR
+                }
+            },
+        ))
+        // Text flips to dark-on-accent when on, dim when off.
+        .color(ParamWidgetBase::make_lens(
+            params,
+            params_to_param,
+            |param| {
+                if param.modulated_normalized_value() >= 0.5 {
+                    ON_TEXT
+                } else {
+                    OFF_TEXT
+                }
+            },
+        ))
+        // Subtle rim when off; blends into the accent fill when on.
+        .border_color(ParamWidgetBase::make_lens(
+            params,
+            params_to_param,
+            |param| {
+                if param.modulated_normalized_value() >= 0.5 {
+                    ON_COLOR
+                } else {
+                    OFF_BORDER
                 }
             },
         ))

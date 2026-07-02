@@ -49,8 +49,8 @@ impl Meter {
             })
             // Default size so the meter is visible without any stylesheet; a
             // theme rule for `.daudio-meter` can still override these.
-            .width(Pixels(16.0))
-            .height(Pixels(80.0))
+            .width(Pixels(14.0))
+            .height(Pixels(90.0))
     }
 }
 
@@ -69,18 +69,31 @@ impl View for Meter {
         let db = nih_plug::util::gain_to_db(self.level.read().max(1e-6));
         let t = ((db - MIN_DB) / -MIN_DB).clamp(0.0, 1.0);
 
-        // Dark track over the full height.
+        // Rounded corner radius, capped so it never exceeds half the bar width.
+        let radius = 3.0_f32.min(b.w / 2.0);
+
+        // Rounded dark track over the full height.
         let mut track = vg::Path::new();
-        track.rect(b.x, b.y, b.w, b.h);
-        canvas.fill_path(&track, &vg::Paint::color(vg::Color::rgb(0x24, 0x24, 0x2c)));
+        track.rounded_rect(b.x, b.y, b.w, b.h, radius);
+        canvas.fill_path(&track, &vg::Paint::color(crate::theme::SURFACE));
 
         // Filled portion anchored at the BOTTOM: height `t * b.h`, so it grows
-        // upward from the base of the meter.
+        // upward from the base of the meter, with a vertical accent gradient
+        // (brighter at the top). Rounded corners share the track radius.
         if t > 0.0 {
             let fill_h = b.h * t;
+            let top = b.y + b.h - fill_h;
             let mut fill = vg::Path::new();
-            fill.rect(b.x, b.y + b.h - fill_h, b.w, fill_h);
-            canvas.fill_path(&fill, &vg::Paint::color(crate::theme::ACCENT));
+            fill.rounded_rect(b.x, top, b.w, fill_h, radius);
+            let paint = vg::Paint::linear_gradient(
+                b.x,
+                top,
+                b.x,
+                b.y + b.h,
+                crate::theme::ACCENT_BRIGHT,
+                crate::theme::ACCENT,
+            );
+            canvas.fill_path(&fill, &paint);
         }
     }
 }

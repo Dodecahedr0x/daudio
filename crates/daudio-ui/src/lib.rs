@@ -14,7 +14,9 @@ pub use knob::Knob;
 pub use meter::Meter;
 pub use note_toggle::NoteToggle;
 pub use param_control::ParamControl;
-pub use theme::{apply_theme, ACCENT};
+pub use theme::{
+    apply_theme, ACCENT, ACCENT_BRIGHT, BG, BORDER, PANEL, SURFACE, TEXT, TEXT_DIM, TEXT_MUTED,
+};
 
 // Re-export so plugins can name the audio→UI meter channel via daudio-ui
 // (which they already depend on for the `Meter` widget).

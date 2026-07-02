@@ -30,6 +30,8 @@ pub struct Knob {
     param_base: ParamWidgetBase,
     /// Whether a left-button drag is in progress.
     dragging: bool,
+    /// Whether the pointer is currently over the knob (drives the hover accent).
+    hovering: bool,
     /// Mouse Y at the start of the current drag (logical pixels).
     drag_start_y: f32,
     /// Normalized parameter value at the start of the current drag.
@@ -54,6 +56,7 @@ impl Knob {
         Self {
             param_base: ParamWidgetBase::new(cx, params, params_to_param),
             dragging: false,
+            hovering: false,
             drag_start_y: 0.0,
             drag_start_value: 0.0,
         }
@@ -61,8 +64,8 @@ impl Knob {
         .build(cx, |_| {})
         // Default size so the knob is visible without any stylesheet; a theme
         // rule for `.daudio-knob` can still override these.
-        .width(Pixels(56.0))
-        .height(Pixels(56.0))
+        .width(Pixels(60.0))
+        .height(Pixels(60.0))
     }
 }
 
@@ -82,11 +85,13 @@ impl View for Knob {
             .unmodulated_normalized_value()
             .clamp(0.0, 1.0);
 
-        // Geometry: centred circle inset a little so the stroke stays inside.
+        // Geometry: centred circle inset a little so the widest stroke (the glow)
+        // stays inside the bounds.
         let cx_px = bounds.x + bounds.w / 2.0;
         let cy_px = bounds.y + bounds.h / 2.0;
-        let stroke_width = 3.0;
-        let radius = (bounds.w.min(bounds.h) / 2.0) - stroke_width;
+        let pad = 6.0;
+        let arc_width = 5.0;
+        let radius = (bounds.w.min(bounds.h) / 2.0) - pad;
         if radius <= 0.0 {
             return;
         }
@@ -97,38 +102,64 @@ impl View for Knob {
         let end = (START_ANGLE_DEG + SWEEP_DEG).to_radians();
         let value_end = (START_ANGLE_DEG + SWEEP_DEG * value).to_radians();
 
-        let track_color = vg::Color::rgb(0x3a, 0x3a, 0x44);
-        let value_color = crate::theme::ACCENT;
-        let pointer_color = vg::Color::rgb(0xe0, 0xe0, 0xe8);
+        // The value arc brightens on hover; the body/track stay constant.
+        let value_color = if self.hovering {
+            crate::theme::ACCENT_BRIGHT
+        } else {
+            crate::theme::ACCENT
+        };
 
-        // (1) Background track arc over the full sweep.
+        // (1) Soft glow: the value arc drawn wider and faint underneath, a subtle
+        // bloom. Slightly stronger while hovering. Only when there is a value.
+        if value > 0.0 {
+            let mut glow_color = value_color;
+            glow_color.a = if self.hovering { 0.28 } else { 0.18 };
+            let mut glow = vg::Path::new();
+            glow.arc(cx_px, cy_px, radius, start, value_end, vg::Solidity::Hole);
+            let mut glow_paint = vg::Paint::color(glow_color);
+            glow_paint.set_line_width(9.0);
+            glow_paint.set_line_cap(vg::LineCap::Round);
+            canvas.stroke_path(&glow, &glow_paint);
+        }
+
+        // (2) Background track arc over the full sweep.
         let mut track = vg::Path::new();
         track.arc(cx_px, cy_px, radius, start, end, vg::Solidity::Hole);
-        let mut track_paint = vg::Paint::color(track_color);
-        track_paint.set_line_width(stroke_width);
+        let mut track_paint = vg::Paint::color(crate::theme::SURFACE);
+        track_paint.set_line_width(arc_width);
         track_paint.set_line_cap(vg::LineCap::Round);
         canvas.stroke_path(&track, &track_paint);
 
-        // (2) Value arc from the start up to the current value.
+        // (3) Crisp value arc from the start up to the current value.
         if value > 0.0 {
             let mut fill = vg::Path::new();
             fill.arc(cx_px, cy_px, radius, start, value_end, vg::Solidity::Hole);
             let mut fill_paint = vg::Paint::color(value_color);
-            fill_paint.set_line_width(stroke_width);
+            fill_paint.set_line_width(arc_width);
             fill_paint.set_line_cap(vg::LineCap::Round);
             canvas.stroke_path(&fill, &fill_paint);
         }
 
-        // (3) Pointer line from the centre to the edge at the current angle.
+        // (4) Physical knob cap: a filled body circle with a subtle rim.
+        let body_radius = radius * 0.62;
+        let mut body = vg::Path::new();
+        body.circle(cx_px, cy_px, body_radius);
+        canvas.fill_path(&body, &vg::Paint::color(crate::theme::SURFACE));
+        let mut rim_paint = vg::Paint::color(crate::theme::BORDER);
+        rim_paint.set_line_width(1.0);
+        canvas.stroke_path(&body, &rim_paint);
+
+        // (5) Indicator tick sitting on the cap, pointing at the value angle.
         let (sin, cos) = value_end.sin_cos();
-        let inner = radius * 0.35;
-        let mut pointer = vg::Path::new();
-        pointer.move_to(cx_px + cos * inner, cy_px + sin * inner);
-        pointer.line_to(cx_px + cos * radius, cy_px + sin * radius);
-        let mut pointer_paint = vg::Paint::color(pointer_color);
-        pointer_paint.set_line_width(stroke_width);
-        pointer_paint.set_line_cap(vg::LineCap::Round);
-        canvas.stroke_path(&pointer, &pointer_paint);
+        let inner = radius * 0.34;
+        let outer = radius * 0.60;
+        let mut tick = vg::Path::new();
+        tick.move_to(cx_px + cos * inner, cy_px + sin * inner);
+        tick.line_to(cx_px + cos * outer, cy_px + sin * outer);
+        let mut tick_paint = vg::Paint::color(crate::theme::TEXT);
+        tick_paint.set_line_width(3.0);
+        tick_paint.set_line_cap(vg::LineCap::Round);
+        canvas.stroke_path(&tick, &tick_paint);
     }
 
     fn event(&mut self, cx: &mut EventContext, event: &mut Event) {
@@ -179,6 +210,14 @@ impl View for Knob {
                 self.param_base.end_set_parameter(cx);
                 cx.needs_redraw();
                 meta.consume();
+            }
+            WindowEvent::MouseEnter => {
+                self.hovering = true;
+                cx.needs_redraw();
+            }
+            WindowEvent::MouseLeave => {
+                self.hovering = false;
+                cx.needs_redraw();
             }
             _ => {}
         });
