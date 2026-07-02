@@ -94,7 +94,7 @@ impl View for Knob {
         let value_end = (START_ANGLE_DEG + SWEEP_DEG * value).to_radians();
 
         let track_color = vg::Color::rgb(0x3a, 0x3a, 0x44);
-        let value_color = vg::Color::rgb(0x5e, 0x8b, 0xff);
+        let value_color = crate::theme::ACCENT;
         let pointer_color = vg::Color::rgb(0xe0, 0xe0, 0xe8);
 
         // (1) Background track arc over the full sweep.

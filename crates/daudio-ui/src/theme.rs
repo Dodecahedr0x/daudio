@@ -1,6 +1,17 @@
 //! Shared dark theme for daudio plugin editors.
 
 use nih_plug_vizia::vizia::prelude::*;
+use nih_plug_vizia::vizia::vg;
+
+/// Suite accent — the single branding source for canvas-drawn widgets.
+///
+/// `rgb(94, 139, 255)` ≈ `#5e8bff`, matching the `.daudio-*` CSS accents.
+pub const ACCENT: vg::Color = vg::Color {
+    r: 0.369,
+    g: 0.545,
+    b: 1.0,
+    a: 1.0,
+};
 
 /// Register the embedded daudio stylesheet on the given context.
 ///

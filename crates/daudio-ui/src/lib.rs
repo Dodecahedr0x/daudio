@@ -4,13 +4,19 @@
 
 mod editor;
 mod knob;
+mod meter;
 mod param_control;
 mod theme;
 
 pub use editor::{create_editor, editor_state, DaudioData};
 pub use knob::Knob;
+pub use meter::Meter;
 pub use param_control::ParamControl;
-pub use theme::apply_theme;
+pub use theme::{apply_theme, ACCENT};
+
+// Re-export so plugins can name the audio→UI meter channel via daudio-ui
+// (which they already depend on for the `Meter` widget).
+pub use daudio_sdk::PeakLevel;
 
 // Re-export so downstream plugins can name `ViziaState` / vizia widgets without
 // adding their own `nih_plug_vizia` dependency.
@@ -19,7 +25,9 @@ pub use nih_plug_vizia::ViziaState;
 
 /// Convenient glob import for building daudio editors.
 pub mod prelude {
-    pub use crate::{apply_theme, create_editor, editor_state, DaudioData, Knob, ParamControl};
+    pub use crate::{
+        apply_theme, create_editor, editor_state, DaudioData, Knob, Meter, ParamControl, PeakLevel,
+    };
     pub use nih_plug_vizia::vizia::prelude::*;
     pub use nih_plug_vizia::{ViziaState, ViziaTheming};
 }
