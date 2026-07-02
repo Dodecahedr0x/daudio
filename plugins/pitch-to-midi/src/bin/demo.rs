@@ -1,7 +1,10 @@
-//! Offline preview for the pitch-to-MIDI analyzer — no DAW, host, or input
-//! device. Feeds a WAV through the plugin and prints the emitted MIDI events:
+//! Preview for the pitch-to-MIDI analyzer — no DAW or host needed. Prints the
+//! MIDI notes the plugin emits, from a live input device or a WAV file:
 //!
-//!   cargo run -p pitch-to-midi --bin demo -- input.wav
+//!   cargo run -p pitch-to-midi --bin demo                      # live: default mic
+//!   cargo run -p pitch-to-midi --bin demo -- --list            # list input devices
+//!   cargo run -p pitch-to-midi --bin demo -- --input "<name>"  # live: chosen device
+//!   cargo run -p pitch-to-midi --bin demo -- input.wav         # offline WAV file
 //!
 //! All the logic lives in the reusable `daudio_preview` harness, so every
 //! analyzer's demo binary is this same one-liner.

@@ -20,7 +20,7 @@
 use std::error::Error;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::{FromSample, SizedSample};
+use cpal::{FromSample, Sample, SizedSample};
 use daudio_dsp::notes::note_name;
 use daudio_sdk::nih_plug::prelude::NoteEvent;
 use daudio_sdk::{DaudioAudioToMidi, DaudioEffect};
@@ -56,8 +56,15 @@ where
     }
 }
 
-/// Entry point for an audio→MIDI analyzer's `demo` binary. Feeds a WAV through
-/// the analyzer offline and prints every emitted MIDI note event.
+/// Entry point for an audio→MIDI analyzer's `demo` binary. Prints the MIDI
+/// notes the analyzer emits, from either a live input device or a WAV file:
+///
+/// ```text
+/// demo                    # listen on the default input device (e.g. mic), live
+/// demo --list             # list available input devices
+/// demo --input <name>     # listen on a specific input device
+/// demo <input.wav>        # analyze a WAV file offline
+/// ```
 ///
 /// ```ignore
 /// // plugins/<analyzer>/src/bin/demo.rs
@@ -67,25 +74,156 @@ where
 /// ```
 pub fn run_analyzer<A>()
 where
-    A: DaudioAudioToMidi + Default,
+    A: DaudioAudioToMidi + Default + Send + 'static,
 {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let input = match args.as_slice() {
-        [input, ..] => input.clone(),
-        [] => {
-            eprintln!("usage: demo <input.wav>");
+    let outcome = match args.as_slice() {
+        [] => analyze_live::<A>(None),
+        [flag] if flag == "--list" => list_input_devices(),
+        [flag, name] if flag == "--input" => analyze_live::<A>(Some(name)),
+        [input] => analyze_file::<A>(input),
+        _ => {
+            eprintln!("usage: demo [<input.wav> | --list | --input <device-name>]");
             std::process::exit(2);
         }
     };
-    if let Err(e) = analyze::<A>(&input) {
+    if let Err(e) = outcome {
         eprintln!("error: {e}");
         std::process::exit(1);
     }
 }
 
+/// Print a note-on/off event with its timestamp. Returns `true` if it printed
+/// (so callers can count events). Other event kinds are ignored.
+fn print_note_event(event: &NoteEvent<()>, t: f32) -> bool {
+    match event {
+        NoteEvent::NoteOn { note, velocity, .. } => {
+            println!(
+                "t={:.2}s  NoteOn  {} (vel {:.2})",
+                t,
+                note_name(*note as i32),
+                velocity
+            );
+            true
+        }
+        NoteEvent::NoteOff { note, .. } => {
+            println!("t={:.2}s  NoteOff {}", t, note_name(*note as i32));
+            true
+        }
+        _ => false,
+    }
+}
+
+/// List the host's input devices (marking the default), then return.
+fn list_input_devices() -> Result<()> {
+    let host = cpal::default_host();
+    let default = host.default_input_device().and_then(|d| d.name().ok());
+    println!("Input devices:");
+    for device in host.input_devices()? {
+        let name = device.name().unwrap_or_else(|_| "<unknown>".into());
+        let mark = if Some(&name) == default.as_ref() {
+            "  (default)"
+        } else {
+            ""
+        };
+        println!("  {name}{mark}");
+    }
+    println!("\nUse: demo --input \"<name>\"   (or just `demo` for the default)");
+    Ok(())
+}
+
+/// Live analysis: capture from an input device (the default, or `device_name`)
+/// and print emitted MIDI notes in real time until the user presses Enter.
+fn analyze_live<A>(device_name: Option<&str>) -> Result<()>
+where
+    A: DaudioAudioToMidi + Default + Send + 'static,
+{
+    let host = cpal::default_host();
+    let device = match device_name {
+        Some(name) => host
+            .input_devices()?
+            .find(|d| d.name().map(|n| n == name).unwrap_or(false))
+            .ok_or_else(|| format!("no input device named '{name}' (try `demo --list`)"))?,
+        None => host
+            .default_input_device()
+            .ok_or("no default input device available")?,
+    };
+    let config = device.default_input_config()?;
+    let channels = config.channels() as usize;
+
+    println!(
+        "Listening on: {} @ {} Hz ({:?})",
+        device.name().unwrap_or_else(|_| "<unknown>".into()),
+        config.sample_rate().0,
+        config.sample_format(),
+    );
+    println!("Play or sing — detected notes print below. Press Enter to stop.\n");
+
+    let mut analyzer = A::default();
+    analyzer.activate(config.sample_rate().0 as f32);
+    analyzer.reset();
+
+    let err_fn = |err| eprintln!("input stream error: {err}");
+    let stream = match config.sample_format() {
+        cpal::SampleFormat::F32 => {
+            build_input::<f32, A>(&device, &config.into(), channels, analyzer, err_fn)?
+        }
+        cpal::SampleFormat::I16 => {
+            build_input::<i16, A>(&device, &config.into(), channels, analyzer, err_fn)?
+        }
+        cpal::SampleFormat::U16 => {
+            build_input::<u16, A>(&device, &config.into(), channels, analyzer, err_fn)?
+        }
+        other => return Err(format!("unsupported input sample format: {other:?}").into()),
+    };
+    stream.play()?;
+
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line)?;
+    Ok(())
+}
+
+/// Build a format-specific input stream that downmixes each frame to mono, runs
+/// it through the analyzer, and prints any emitted MIDI events.
+fn build_input<T, A>(
+    device: &cpal::Device,
+    config: &cpal::StreamConfig,
+    channels: usize,
+    mut analyzer: A,
+    err_fn: impl FnMut(cpal::StreamError) + Send + 'static,
+) -> Result<cpal::Stream>
+where
+    T: SizedSample,
+    f32: FromSample<T>,
+    A: DaudioAudioToMidi + Send + 'static,
+{
+    let sample_rate = config.sample_rate.0 as f32;
+    let mut n = 0u64;
+    let stream = device.build_input_stream(
+        config,
+        move |data: &[T], _| {
+            for frame in data.chunks(channels) {
+                let mut sum = 0.0f32;
+                for &sample in frame {
+                    sum += f32::from_sample(sample);
+                }
+                let mono = sum / channels.max(1) as f32;
+                let t = n as f32 / sample_rate;
+                analyzer.process_sample(mono, 0, &mut |event| {
+                    print_note_event(&event, t);
+                });
+                n += 1;
+            }
+        },
+        err_fn,
+        None,
+    )?;
+    Ok(stream)
+}
+
 /// Offline analysis: run every frame of `input` through the analyzer, printing
 /// each emitted note event stamped with its sample-accurate time.
-fn analyze<A>(input: &str) -> Result<()>
+fn analyze_file<A>(input: &str) -> Result<()>
 where
     A: DaudioAudioToMidi + Default,
 {
@@ -101,21 +239,10 @@ where
     for (n, &(l, r)) in frames.iter().enumerate() {
         let mono = (l + r) * 0.5;
         let t = n as f32 / sr;
-        a.process_sample(mono, 0, &mut |event| match event {
-            NoteEvent::NoteOn { note, velocity, .. } => {
+        a.process_sample(mono, 0, &mut |event| {
+            if print_note_event(&event, t) {
                 count += 1;
-                println!(
-                    "t={:.3}s  NoteOn  {} (vel {:.2})",
-                    t,
-                    note_name(note as i32),
-                    velocity
-                );
             }
-            NoteEvent::NoteOff { note, .. } => {
-                count += 1;
-                println!("t={:.3}s  NoteOff {}", t, note_name(note as i32));
-            }
-            _ => {}
         });
     }
     println!("{count} event(s).");
