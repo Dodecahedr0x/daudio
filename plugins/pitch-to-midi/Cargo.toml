@@ -12,3 +12,4 @@ daudio-sdk = { path = "../../crates/daudio-sdk" }
 daudio-dsp = { path = "../../crates/daudio-dsp" }
 daudio-ui = { path = "../../crates/daudio-ui" }
 nih_plug = { git = "https://github.com/robbert-vdh/nih-plug.git", rev = "f36931f7af4646065488a9845d8f8c2f95252c23", features = ["standalone"] }
+daudio-preview = { path = "../../crates/daudio-preview" }

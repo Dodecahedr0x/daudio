@@ -21,7 +21,9 @@ use std::error::Error;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, SizedSample};
-use daudio_sdk::DaudioEffect;
+use daudio_dsp::notes::note_name;
+use daudio_sdk::nih_plug::prelude::NoteEvent;
+use daudio_sdk::{DaudioAudioToMidi, DaudioEffect};
 
 type Frames = Vec<(f32, f32)>;
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
@@ -52,6 +54,72 @@ where
         eprintln!("error: {err}");
         std::process::exit(1);
     }
+}
+
+/// Entry point for an audio→MIDI analyzer's `demo` binary. Feeds a WAV through
+/// the analyzer offline and prints every emitted MIDI note event.
+///
+/// ```ignore
+/// // plugins/<analyzer>/src/bin/demo.rs
+/// fn main() {
+///     daudio_preview::run_analyzer::<my_analyzer::MyPlugin>();
+/// }
+/// ```
+pub fn run_analyzer<A>()
+where
+    A: DaudioAudioToMidi + Default,
+{
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let input = match args.as_slice() {
+        [input, ..] => input.clone(),
+        [] => {
+            eprintln!("usage: demo <input.wav>");
+            std::process::exit(2);
+        }
+    };
+    if let Err(e) = analyze::<A>(&input) {
+        eprintln!("error: {e}");
+        std::process::exit(1);
+    }
+}
+
+/// Offline analysis: run every frame of `input` through the analyzer, printing
+/// each emitted note event stamped with its sample-accurate time.
+fn analyze<A>(input: &str) -> Result<()>
+where
+    A: DaudioAudioToMidi + Default,
+{
+    let (frames, sample_rate) = read_wav(input)?;
+    let sr = sample_rate as f32;
+
+    let mut a = A::default();
+    a.activate(sr);
+    a.reset();
+
+    println!("Analyzing {input} @ {sample_rate} Hz -> MIDI:");
+    let mut count = 0usize;
+    for (n, &(l, r)) in frames.iter().enumerate() {
+        let mono = (l + r) * 0.5;
+        let t = n as f32 / sr;
+        a.process_sample(mono, 0, &mut |event| match event {
+            NoteEvent::NoteOn { note, velocity, .. } => {
+                count += 1;
+                println!(
+                    "t={:.3}s  NoteOn  {} (vel {:.2})",
+                    t,
+                    note_name(note as i32),
+                    velocity
+                );
+            }
+            NoteEvent::NoteOff { note, .. } => {
+                count += 1;
+                println!("t={:.3}s  NoteOff {}", t, note_name(note as i32));
+            }
+            _ => {}
+        });
+    }
+    println!("{count} event(s).");
+    Ok(())
 }
 
 /// No args: play a 110 Hz saw through the effect at its default settings.

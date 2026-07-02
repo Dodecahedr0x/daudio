@@ -6,5 +6,6 @@ license.workspace = true
 
 [dependencies]
 daudio-sdk = { path = "../daudio-sdk" }
+daudio-dsp = { path = "../daudio-dsp" }
 cpal = "0.15"
 hound = "3.5"
