@@ -40,6 +40,14 @@ pub fn quantize(midi: i32, root: u8, degree_mask: u16) -> Option<i32> {
     Some(midi)
 }
 
+/// Normalized 14-bit-style pitch-bend value (0.0..=1.0, 0.5 = no bend) for a
+/// detected frequency relative to `note`, over a +/- 2 semitone range.
+pub fn bend_value(detected_hz: f32, note: u8) -> f32 {
+    let note_freq = 440.0 * 2.0_f32.powf((note as f32 - 69.0) / 12.0);
+    let dev_semitones = 12.0 * (detected_hz / note_freq).log2();
+    (0.5 + dev_semitones / 4.0).clamp(0.0, 1.0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -74,5 +82,24 @@ mod tests {
     #[test]
     fn empty_mask_is_none() {
         assert_eq!(quantize(60, 0, 0), None);
+    }
+    #[test]
+    fn bend_center_on_exact_note() {
+        assert!((bend_value(440.0, 69) - 0.5).abs() < 1e-4);
+    }
+    #[test]
+    fn bend_sharp_one_semitone() {
+        // +1 semitone (A#4 = 466.16 Hz) -> +0.25 -> 0.75.
+        assert!((bend_value(466.16, 69) - 0.75).abs() < 1e-2);
+    }
+    #[test]
+    fn bend_flat_two_semitones_clamps_to_zero() {
+        // -2 semitones (G4 = 392.0 Hz) -> dev -2 -> 0.5 - 0.5 = 0.0.
+        assert!((bend_value(392.0, 69) - 0.0).abs() < 1e-2);
+    }
+    #[test]
+    fn bend_beyond_range_clamps_to_one() {
+        // +3 semitones (C5 = 523.25 Hz) -> clamped to 1.0.
+        assert!((bend_value(523.25, 69) - 1.0).abs() < 1e-4);
     }
 }
