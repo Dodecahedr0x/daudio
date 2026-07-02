@@ -15,13 +15,24 @@
 }
 
 .daudio-control {
+  width: auto;
   height: auto;
-  row-between: 3px;
+  row-between: 4px;
   layout-type: column;
+  child-left: 1s;
+  child-right: 1s;
 }
 
 .daudio-label {
   color: #9a9aa6;
   font-size: 13;
   height: auto;
+  width: auto;
+  child-left: 1s;
+  child-right: 1s;
+}
+
+.daudio-knob {
+  width: 56px;
+  height: 56px;
 }
