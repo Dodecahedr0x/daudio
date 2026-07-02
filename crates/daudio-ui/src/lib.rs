@@ -5,12 +5,14 @@
 mod editor;
 mod knob;
 mod meter;
+mod note_toggle;
 mod param_control;
 mod theme;
 
 pub use editor::{create_editor, editor_state, DaudioData};
 pub use knob::Knob;
 pub use meter::Meter;
+pub use note_toggle::NoteToggle;
 pub use param_control::ParamControl;
 pub use theme::{apply_theme, ACCENT};
 
@@ -26,7 +28,8 @@ pub use nih_plug_vizia::ViziaState;
 /// Convenient glob import for building daudio editors.
 pub mod prelude {
     pub use crate::{
-        apply_theme, create_editor, editor_state, DaudioData, Knob, Meter, ParamControl, PeakLevel,
+        apply_theme, create_editor, editor_state, DaudioData, Knob, Meter, NoteToggle,
+        ParamControl, PeakLevel,
     };
     pub use nih_plug_vizia::vizia::prelude::*;
     pub use nih_plug_vizia::{ViziaState, ViziaTheming};
