@@ -3,6 +3,7 @@
 pub mod adsr;
 pub mod biquad;
 pub mod gain;
+pub mod notes;
 pub mod oscillator;
 pub mod processor;
 pub mod smoother;
