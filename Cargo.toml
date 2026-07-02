@@ -8,3 +8,11 @@ license = "MIT"
 
 [profile.release]
 lto = "thin"
+
+# Work around a baseview macOS crash under recent nightly rustc: during window
+# setup AppKit calls `becomeFirstResponder` while the NSView isn't attached to a
+# window yet, so `[view window]` is nil. Messaging nil is valid Objective-C, but
+# rustc's debug-assertions-gated null-dereference check aborts on it. Disabling
+# debug-assertions for just baseview elides that check (our own crates keep them).
+[profile.dev.package.baseview]
+debug-assertions = false
