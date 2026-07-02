@@ -13,5 +13,5 @@ daudio-dsp = { path = "../../crates/daudio-dsp" }
 daudio-ui = { path = "../../crates/daudio-ui" }
 nih_plug = { git = "https://github.com/robbert-vdh/nih-plug.git", rev = "f36931f7af4646065488a9845d8f8c2f95252c23", features = ["standalone"] }
 
-# Only used by the `demo` binary, to play a test tone through the filter.
-cpal = "0.15"
+# Reusable preview harness, used by the `demo` binary.
+daudio-preview = { path = "../../crates/daudio-preview" }
