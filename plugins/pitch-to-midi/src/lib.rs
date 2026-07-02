@@ -315,17 +315,31 @@ fn apply_preset(cx: &mut EventContext, params: &PitchToMidiParams, degrees: &[u8
     }
 }
 
-/// A note-name readout model: holds the shared `detected`/`output` atomics and a
-/// formatted `text` field that a bound [`Label`] renders. A timer emits
-/// [`ReadoutEvent::Tick`] to re-read the atomics into `text`.
+/// The editor's reactive model. Vizia stores never change unless mutated inside
+/// an event handler, so a ~50 ms timer emits [`ReadoutEvent::Tick`] and this
+/// model re-reads, on each tick, both the shared `detected`/`output` atoms (into
+/// the `text` readout) and — crucially — the current root pitch class (into
+/// `root`).
+///
+/// `root_pitch` is what makes the note-toggle captions relabel live: the twelve
+/// toggles' captions `Binding` on the [`Readout::root_pitch`] lens, and because
+/// that is a genuine tracked store (unlike a `.map` over the never-changing
+/// params `Arc`), the binding re-runs whenever the value changes — within one
+/// timer interval of the user moving the root selector. (The field can't be
+/// named `root`: vizia's `Lens` derive reserves that for the whole-struct lens.)
 #[derive(Lens)]
 struct Readout {
     detected: Arc<AtomicI32>,
     output: Arc<AtomicI32>,
+    /// Params handle, read each tick for the current root.
+    params: Arc<PitchToMidiParams>,
+    /// Current root pitch class `0..=11`; the note toggles bind to this.
+    root_pitch: u8,
+    /// Formatted `in: … out: …` readout string.
     text: String,
 }
 
-/// Event that drives the [`Readout`] to re-read its atomics.
+/// Event that drives the [`Readout`] to re-read its atomics and root.
 enum ReadoutEvent {
     Tick,
 }
@@ -349,31 +363,10 @@ impl Model for Readout {
         event.map(|e, _| match e {
             ReadoutEvent::Tick => {
                 self.text = Readout::format(self.detected.load(Relaxed), self.output.load(Relaxed));
+                self.root_pitch = root_pc(self.params.root.value());
             }
         });
     }
-}
-
-/// Build the note-name readout: a [`Readout`] model, a label bound to its text,
-/// and a repeating timer that refreshes it from the atomics.
-fn build_readout(cx: &mut Context, detected: Arc<AtomicI32>, output: Arc<AtomicI32>) {
-    HStack::new(cx, move |cx| {
-        Readout {
-            text: Readout::format(-1, -1),
-            detected,
-            output,
-        }
-        .build(cx);
-        Label::new(cx, Readout::text).class("daudio-label");
-
-        let timer = cx.add_timer(READOUT_INTERVAL, None, |cx, action| {
-            if let TimerAction::Tick(_) = action {
-                cx.emit(ReadoutEvent::Tick);
-            }
-        });
-        cx.start_timer(timer);
-    })
-    .class("daudio-row");
 }
 
 /// Build the full Pitch2MIDI editor tree.
@@ -384,12 +377,29 @@ fn build_editor(
     output: Arc<AtomicI32>,
 ) {
     // Lens giving the current root pitch class, used to caption the toggles.
-    // NOTE: this maps over the params Arc, whose pointer never changes, so the
-    // toggle captions may not relabel *live* when the root moves — a human
-    // should confirm relabelling behaviour.
-    let root_lens = DaudioData::<PitchToMidiParams>::params.map(|p| root_pc(p.root.value()));
+    // Backed by the reactive `Readout` model (built below onto this VStack), so
+    // the captions relabel live when the root changes — within one timer tick.
+    let root_lens = Readout::root_pitch;
 
     VStack::new(cx, move |cx| {
+        // Build the reactive model onto this VStack (an ancestor of the toggles
+        // and the readout label, so both lenses resolve) and start its refresh
+        // timer, BEFORE any widget that binds to it.
+        Readout {
+            root_pitch: root_pc(params.root.value()),
+            text: Readout::format(-1, -1),
+            params: params.clone(),
+            detected,
+            output,
+        }
+        .build(cx);
+        let timer = cx.add_timer(READOUT_INTERVAL, None, |cx, action| {
+            if let TimerAction::Tick(_) = action {
+                cx.emit(ReadoutEvent::Tick);
+            }
+        });
+        cx.start_timer(timer);
+
         Label::new(cx, "daudio Pitch2MIDI").class("daudio-title");
 
         // Root selector: ParamSlider works over the `EnumParam<Root>`.
@@ -454,8 +464,11 @@ fn build_editor(
         })
         .class("daudio-row");
 
-        // Note-name readout.
-        build_readout(cx, detected, output);
+        // Note-name readout, bound to the reactive model built above.
+        HStack::new(cx, |cx| {
+            Label::new(cx, Readout::text).class("daudio-label");
+        })
+        .class("daudio-row");
     })
     .class("daudio-panel")
     // Guaranteed background even if the stylesheet fails to apply, so the editor
