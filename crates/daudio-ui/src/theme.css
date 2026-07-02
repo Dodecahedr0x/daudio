@@ -1,0 +1,27 @@
+/* daudio shared dark theme */
+
+.daudio-panel {
+  background-color: #1c1c22;
+  child-space: 12px;
+  row-between: 10px;
+  layout-type: column;
+}
+
+.daudio-title {
+  color: #f0f0f4;
+  font-size: 22;
+  height: auto;
+  child-bottom: 4px;
+}
+
+.daudio-control {
+  height: auto;
+  row-between: 3px;
+  layout-type: column;
+}
+
+.daudio-label {
+  color: #9a9aa6;
+  font-size: 13;
+  height: auto;
+}
