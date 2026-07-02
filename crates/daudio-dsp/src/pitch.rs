@@ -25,13 +25,22 @@ pub struct PitchTracker {
     hop_counter: usize,
     sample_rate: usize,
 }
-// SAFETY: `McLeodDetector`'s internal `BufferPool` uses `Rc<RefCell<Vec<_>>>`
-// scratch buffers, so `PitchTracker` is not `Send` by default. Those `Rc`s are
-// private to the tracker and never cloned or handed out, so the whole object
-// graph has a single owner and always moves together. `PitchTracker` is not
-// `Sync` and is only ever touched from one thread at a time, so satisfying the
-// `Plugin: Send` bound (which moves — never shares — the plugin between threads)
-// cannot cause concurrent access to a non-atomic refcount.
+// SAFETY: `McLeodDetector`'s internal `BufferPool` holds `Rc<RefCell<Vec<_>>>`
+// scratch buffers (non-atomic refcounts), so `PitchTracker` is not `Send` by
+// default. Granting `Send` (and ONLY `Send` — not `Sync`) is sound here because:
+//   1. No `Rc` clone ever escapes the object graph. `get_pitch` does clone the
+//      pooled `Rc`s internally to loan buffers, but those clones are locals that
+//      drop before it returns, so between calls every `Rc` is back to
+//      strong_count == 1 and the whole graph has a single owner that moves as a
+//      unit. Two threads can therefore never hold clones of the same allocation.
+//   2. Access is `&mut self`-exclusive: refcounts only mutate inside `get_pitch`
+//      (reached via `push`, which takes `&mut self`), and nih-plug never calls
+//      `process`/`reset`/`initialize` concurrently — so refcount mutation is
+//      serialized regardless of which thread owns the tracker.
+//   3. `PitchTracker` stays `!Sync`, so `&PitchTracker` can't be shared across
+//      threads; satisfying `Plugin: Send` only ever *moves* the plugin.
+//   4. `pitch-detection`/`rustfft` spawn no threads (single-threaded FFT), so
+//      there is no hidden concurrent access to the pool.
 unsafe impl Send for PitchTracker {}
 
 impl Default for PitchTracker {
