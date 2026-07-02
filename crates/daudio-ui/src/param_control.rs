@@ -9,7 +9,7 @@ use nih_plug_vizia::widgets::ParamSlider;
 /// The generic bounds mirror [`ParamSlider::new`] verbatim (lens over a
 /// `Params` value plus a `Fn(&Params) -> &P` accessor); the only addition is
 /// the `.daudio-label` caption above the slider.
-pub struct ParamControl {}
+pub struct ParamControl;
 
 impl ParamControl {
     /// Build a labeled control. `label` is the caption; `params` is the lens to

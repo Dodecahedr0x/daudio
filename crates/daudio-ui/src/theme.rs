@@ -2,9 +2,6 @@
 
 use nih_plug_vizia::vizia::prelude::*;
 
-/// The daudio suite accent color.
-pub const ACCENT: Color = Color::rgb(0x5e, 0x8b, 0xff);
-
 /// Register the embedded daudio stylesheet on the given context.
 ///
 /// Mirrors `nih_plug_vizia`'s own theme registration (`cx.add_stylesheet` +
