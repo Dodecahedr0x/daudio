@@ -3,10 +3,12 @@
 //! `create_vizia_editor` + Lens/Model boilerplate.
 
 mod editor;
+mod knob;
 mod param_control;
 mod theme;
 
 pub use editor::{create_editor, editor_state, DaudioData};
+pub use knob::Knob;
 pub use param_control::ParamControl;
 pub use theme::apply_theme;
 
@@ -17,7 +19,7 @@ pub use nih_plug_vizia::ViziaState;
 
 /// Convenient glob import for building daudio editors.
 pub mod prelude {
-    pub use crate::{apply_theme, create_editor, editor_state, DaudioData, ParamControl};
+    pub use crate::{apply_theme, create_editor, editor_state, DaudioData, Knob, ParamControl};
     pub use nih_plug_vizia::vizia::prelude::*;
     pub use nih_plug_vizia::{ViziaState, ViziaTheming};
 }
