@@ -18,7 +18,7 @@ pub struct FilterParams {
 impl Default for FilterParams {
     fn default() -> Self {
         Self {
-            editor_state: daudio_ui::editor_state(300, 240),
+            editor_state: daudio_ui::editor_state(330, 230),
             cutoff: hz_param("Cutoff", 1000.0, 20.0, 20_000.0),
             gain: db_gain_param("Gain", -60.0, 6.0, 0.0),
         }
@@ -73,36 +73,31 @@ impl DaudioEffect for FilterPlugin {
             move |cx| {
                 VStack::new(cx, |cx| {
                     Label::new(cx, "daudio Filter").class("daudio-title");
-                    VStack::new(cx, |cx| {
-                        Label::new(cx, "FILTER").class("daudio-section");
-                        HStack::new(cx, |cx| {
-                            ParamControl::new(
-                                cx,
-                                "Cutoff",
-                                DaudioData::<FilterParams>::params,
-                                |p| &p.cutoff,
-                            );
-                            ParamControl::new(
-                                cx,
-                                "Gain",
-                                DaudioData::<FilterParams>::params,
-                                |p| &p.gain,
-                            );
-                            VStack::new(cx, |cx| {
-                                Meter::new(cx, meter.clone());
-                                Label::new(cx, "OUT").class("daudio-label");
-                            })
-                            .class("daudio-control");
+                    card(cx, "FILTER", |cx| {
+                        ParamControl::new(cx, "Cutoff", DaudioData::<FilterParams>::params, |p| {
+                            &p.cutoff
+                        });
+                        ParamControl::new(cx, "Gain", DaudioData::<FilterParams>::params, |p| {
+                            &p.gain
+                        });
+                        VStack::new(cx, |cx| {
+                            Meter::new(cx, meter.clone());
+                            Label::new(cx, "OUT").class("daudio-label");
                         })
-                        .class("daudio-row");
-                    })
-                    .class("daudio-card");
+                        .height(Auto)
+                        .width(Auto)
+                        .row_between(Pixels(6.0))
+                        .child_left(Stretch(1.0))
+                        .child_right(Stretch(1.0));
+                    });
                 })
                 .class("daudio-panel")
                 // Guaranteed background + fill even if the stylesheet fails to
                 // apply, so the editor never renders as a bare white window.
                 // Matches the theme `BG` (#16161c).
                 .background_color(Color::rgb(0x16, 0x16, 0x1c))
+                .child_space(Pixels(18.0))
+                .row_between(Pixels(14.0))
                 .width(Percentage(100.0))
                 .height(Percentage(100.0));
             },

@@ -85,3 +85,25 @@
   child-left: 1s;
   child-right: 1s;
 }
+
+/* Dark themed button (e.g. scale presets) — overrides vizia's default white. */
+.daudio-preset {
+  background-color: #2c2c38;
+  border-radius: 6px;
+  border-width: 1px;
+  border-color: #383843;
+  height: 30px;
+  child-space: 1s;
+  child-left: 10px;
+  child-right: 10px;
+}
+
+.daudio-preset:hover {
+  background-color: #383843;
+  border-color: #5b8cff;
+}
+
+.daudio-preset label {
+  color: #dfe0e8;
+  font-size: 12;
+}

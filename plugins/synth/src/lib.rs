@@ -75,7 +75,7 @@ fn unit_param(name: &str, default: f32) -> FloatParam {
 impl Default for SynthParams {
     fn default() -> Self {
         Self {
-            editor_state: daudio_ui::editor_state(560, 300),
+            editor_state: daudio_ui::editor_state(600, 440),
             waveform: EnumParam::new("Waveform", WaveformChoice::Saw),
             cutoff: hz_param("Cutoff", 2_000.0, 20.0, 20_000.0),
             resonance: FloatParam::new(
@@ -178,93 +178,79 @@ impl DaudioSynth for Synth {
             |cx| {
                 VStack::new(cx, |cx| {
                     Label::new(cx, "daudio Synth").class("daudio-title");
+                    // Row 1: oscillator + filter.
                     HStack::new(cx, |cx| {
-                        VStack::new(cx, |cx| {
-                            Label::new(cx, "OSCILLATOR").class("daudio-section");
-                            HStack::new(cx, |cx| {
-                                ParamSlider::new(cx, DaudioData::<SynthParams>::params, |p| {
-                                    &p.waveform
-                                });
+                        card(cx, "OSCILLATOR", |cx| {
+                            ParamSlider::new(cx, DaudioData::<SynthParams>::params, |p| {
+                                &p.waveform
                             })
-                            .class("daudio-row");
-                        })
-                        .class("daudio-card");
-                        VStack::new(cx, |cx| {
-                            Label::new(cx, "FILTER").class("daudio-section");
-                            HStack::new(cx, |cx| {
-                                ParamControl::new(
-                                    cx,
-                                    "Cutoff",
-                                    DaudioData::<SynthParams>::params,
-                                    |p| &p.cutoff,
-                                );
-                                ParamControl::new(
-                                    cx,
-                                    "Reso",
-                                    DaudioData::<SynthParams>::params,
-                                    |p| &p.resonance,
-                                );
-                                ParamControl::new(
-                                    cx,
-                                    "Env Amt",
-                                    DaudioData::<SynthParams>::params,
-                                    |p| &p.env_amount,
-                                );
-                            })
-                            .class("daudio-row");
-                        })
-                        .class("daudio-card");
+                            .width(Pixels(96.0));
+                        });
+                        card(cx, "FILTER", |cx| {
+                            ParamControl::new(
+                                cx,
+                                "Cutoff",
+                                DaudioData::<SynthParams>::params,
+                                |p| &p.cutoff,
+                            );
+                            ParamControl::new(cx, "Reso", DaudioData::<SynthParams>::params, |p| {
+                                &p.resonance
+                            });
+                            ParamControl::new(
+                                cx,
+                                "Env Amt",
+                                DaudioData::<SynthParams>::params,
+                                |p| &p.env_amount,
+                            );
+                        });
                     })
-                    .class("daudio-row");
+                    .height(Auto)
+                    .width(Auto)
+                    .col_between(Pixels(14.0));
+                    // Row 2: envelope + output.
                     HStack::new(cx, |cx| {
-                        VStack::new(cx, |cx| {
-                            Label::new(cx, "ENVELOPE").class("daudio-section");
-                            HStack::new(cx, |cx| {
-                                ParamControl::new(
-                                    cx,
-                                    "Attack",
-                                    DaudioData::<SynthParams>::params,
-                                    |p| &p.attack,
-                                );
-                                ParamControl::new(
-                                    cx,
-                                    "Decay",
-                                    DaudioData::<SynthParams>::params,
-                                    |p| &p.decay,
-                                );
-                                ParamControl::new(
-                                    cx,
-                                    "Sustain",
-                                    DaudioData::<SynthParams>::params,
-                                    |p| &p.sustain,
-                                );
-                                ParamControl::new(
-                                    cx,
-                                    "Release",
-                                    DaudioData::<SynthParams>::params,
-                                    |p| &p.release,
-                                );
-                            })
-                            .class("daudio-row");
-                        })
-                        .class("daudio-card");
-                        VStack::new(cx, |cx| {
-                            Label::new(cx, "OUTPUT").class("daudio-section");
-                            HStack::new(cx, |cx| {
-                                ParamControl::new(
-                                    cx,
-                                    "Gain",
-                                    DaudioData::<SynthParams>::params,
-                                    |p| &p.gain,
-                                );
-                            })
-                            .class("daudio-row");
-                        })
-                        .class("daudio-card");
+                        card(cx, "ENVELOPE", |cx| {
+                            ParamControl::new(
+                                cx,
+                                "Attack",
+                                DaudioData::<SynthParams>::params,
+                                |p| &p.attack,
+                            );
+                            ParamControl::new(
+                                cx,
+                                "Decay",
+                                DaudioData::<SynthParams>::params,
+                                |p| &p.decay,
+                            );
+                            ParamControl::new(
+                                cx,
+                                "Sustain",
+                                DaudioData::<SynthParams>::params,
+                                |p| &p.sustain,
+                            );
+                            ParamControl::new(
+                                cx,
+                                "Release",
+                                DaudioData::<SynthParams>::params,
+                                |p| &p.release,
+                            );
+                        });
+                        card(cx, "OUTPUT", |cx| {
+                            ParamControl::new(cx, "Gain", DaudioData::<SynthParams>::params, |p| {
+                                &p.gain
+                            });
+                        });
                     })
-                    .class("daudio-row");
+                    .height(Auto)
+                    .width(Auto)
+                    .col_between(Pixels(14.0));
                 })
-                .class("daudio-panel");
+                .class("daudio-panel")
+                .child_space(Pixels(18.0))
+                .row_between(Pixels(14.0))
+                .background_color(Color::rgb(0x16, 0x16, 0x1c))
+                .width(Percentage(100.0))
+                .height(Percentage(100.0));
             },
         )
     }

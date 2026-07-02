@@ -130,7 +130,7 @@ impl Default for PitchToMidiParams {
             )
             .with_unit(" ms"),
             pitch_bend: BoolParam::new("Pitch Bend", false),
-            editor_state: daudio_ui::editor_state(660, 320),
+            editor_state: daudio_ui::editor_state(620, 430),
         }
     }
 }
@@ -462,15 +462,19 @@ fn build_editor(
         Label::new(cx, "daudio Pitch2MIDI").class("daudio-title");
 
         // Scale card: root selector, the twelve note toggles, and the presets.
-        VStack::new(cx, move |cx| {
-            Label::new(cx, "SCALE").class("daudio-section");
-
+        card_column(cx, "SCALE", move |cx| {
             // Root selector: ParamSlider works over the `EnumParam<Root>`.
             HStack::new(cx, |cx| {
-                Label::new(cx, "Root").class("daudio-label");
-                ParamSlider::new(cx, DaudioData::<PitchToMidiParams>::params, |p| &p.root);
+                Label::new(cx, "Root")
+                    .class("daudio-label")
+                    .child_top(Stretch(1.0))
+                    .child_bottom(Stretch(1.0));
+                ParamSlider::new(cx, DaudioData::<PitchToMidiParams>::params, |p| &p.root)
+                    .width(Pixels(130.0));
             })
-            .class("daudio-row");
+            .height(Auto)
+            .width(Auto)
+            .col_between(Pixels(10.0));
 
             // Scale editor: twelve note toggles sharing the root lens.
             HStack::new(cx, move |cx| {
@@ -498,7 +502,9 @@ fn build_editor(
                 toggle!(degree_10, 10);
                 toggle!(degree_11, 11);
             })
-            .class("daudio-row");
+            .height(Auto)
+            .width(Auto)
+            .col_between(Pixels(5.0));
 
             // Preset buttons: each writes its pattern to the degree params.
             HStack::new(cx, move |cx| {
@@ -508,17 +514,18 @@ fn build_editor(
                         cx,
                         move |cx| apply_preset(cx, &params, degrees),
                         move |cx| Label::new(cx, name),
-                    );
+                    )
+                    .class("daudio-preset");
                 }
             })
-            .class("daudio-row");
-        })
-        .class("daudio-card");
+            .height(Auto)
+            .width(Auto)
+            .col_between(Pixels(6.0));
+        });
 
-        // Detection card: sensitivity + hold knobs and the pitch-bend toggle.
-        VStack::new(cx, |cx| {
-            Label::new(cx, "DETECTION").class("daudio-section");
-            HStack::new(cx, |cx| {
+        // Detection + readout side by side.
+        HStack::new(cx, move |cx| {
+            card(cx, "DETECTION", |cx| {
                 ParamControl::new(
                     cx,
                     "Sensitivity",
@@ -530,27 +537,26 @@ fn build_editor(
                 });
                 ParamButton::new(cx, DaudioData::<PitchToMidiParams>::params, |p| {
                     &p.pitch_bend
-                });
-            })
-            .class("daudio-row");
-        })
-        .class("daudio-card");
-
-        // Readout footer: a draw()-based leaf reading the shared atomics every
-        // frame (baseview redraws each frame; vizia timers are inert).
-        VStack::new(cx, move |cx| {
-            Label::new(cx, "DETECTED → OUT").class("daudio-section");
-            HStack::new(cx, move |cx| {
+                })
+                .child_top(Stretch(1.0))
+                .child_bottom(Stretch(1.0));
+            });
+            // Readout: a draw()-based leaf reading the shared atomics every frame
+            // (baseview redraws each frame; vizia timers are inert).
+            card(cx, "DETECTED → OUT", move |cx| {
                 NoteReadout::new(cx, detected, output);
-            })
-            .class("daudio-row");
+            });
         })
-        .class("daudio-card");
+        .height(Auto)
+        .width(Auto)
+        .col_between(Pixels(14.0));
     })
     .class("daudio-panel")
     // Guaranteed background even if the stylesheet fails to apply, so the editor
     // never renders as a bare white window (matches the theme `BG` #16161c).
     .background_color(Color::rgb(0x16, 0x16, 0x1c))
+    .child_space(Pixels(18.0))
+    .row_between(Pixels(14.0))
     .width(Percentage(100.0))
     .height(Percentage(100.0));
 }
