@@ -64,16 +64,30 @@ impl Parse for PluginArgs {
         for arg in args {
             let key = arg.key;
             let key_str = key.to_string();
+
+            // Reject duplicate keys instead of silently last-wins.
+            macro_rules! assign {
+                ($slot:ident, $val:expr) => {{
+                    if $slot.is_some() {
+                        return Err(syn::Error::new(
+                            key.span(),
+                            format!("duplicate `daudio_plugin` key `{key_str}`"),
+                        ));
+                    }
+                    $slot = Some($val);
+                }};
+            }
+
             match (key_str.as_str(), arg.value) {
-                ("name", ArgValue::Str(s)) => name = Some(s),
-                ("vendor", ArgValue::Str(s)) => vendor = Some(s),
-                ("url", ArgValue::Str(s)) => url = Some(s),
-                ("email", ArgValue::Str(s)) => email = Some(s),
-                ("clap_id", ArgValue::Str(s)) => clap_id = Some(s),
-                ("clap_description", ArgValue::Str(s)) => clap_description = Some(s),
-                ("vst3_id", ArgValue::Str(s)) => vst3_id = Some(s),
-                ("clap_features", ArgValue::Idents(v)) => clap_features = Some(v),
-                ("vst3_categories", ArgValue::Idents(v)) => vst3_categories = Some(v),
+                ("name", ArgValue::Str(s)) => assign!(name, s),
+                ("vendor", ArgValue::Str(s)) => assign!(vendor, s),
+                ("url", ArgValue::Str(s)) => assign!(url, s),
+                ("email", ArgValue::Str(s)) => assign!(email, s),
+                ("clap_id", ArgValue::Str(s)) => assign!(clap_id, s),
+                ("clap_description", ArgValue::Str(s)) => assign!(clap_description, s),
+                ("vst3_id", ArgValue::Str(s)) => assign!(vst3_id, s),
+                ("clap_features", ArgValue::Idents(v)) => assign!(clap_features, v),
+                ("vst3_categories", ArgValue::Idents(v)) => assign!(vst3_categories, v),
                 (other, _) => {
                     return Err(syn::Error::new(
                         key.span(),
@@ -162,28 +176,28 @@ pub fn daudio_plugin(attr: TokenStream, item: TokenStream) -> TokenStream {
 
     let clap_features_ts = clap_features
         .iter()
-        .map(|f| quote! { nih_plug::prelude::ClapFeature::#f });
+        .map(|f| quote! { ::daudio_sdk::nih_plug::prelude::ClapFeature::#f });
     let vst3_categories_ts = vst3_categories
         .iter()
-        .map(|c| quote! { nih_plug::prelude::Vst3SubCategory::#c });
+        .map(|c| quote! { ::daudio_sdk::nih_plug::prelude::Vst3SubCategory::#c });
 
     let vst3_id_bytes = LitByteStr::new(vst3_id_value.as_bytes(), vst3_id.span());
 
     let expanded = quote! {
         #item_struct
 
-        impl nih_plug::prelude::Plugin for #ident {
+        impl ::daudio_sdk::nih_plug::prelude::Plugin for #ident {
             const NAME: &'static str = #name;
             const VENDOR: &'static str = #vendor;
             const URL: &'static str = #url_ts;
             const EMAIL: &'static str = #email_ts;
             const VERSION: &'static str = env!("CARGO_PKG_VERSION");
 
-            const AUDIO_IO_LAYOUTS: &'static [nih_plug::prelude::AudioIOLayout] =
-                &[nih_plug::prelude::AudioIOLayout {
+            const AUDIO_IO_LAYOUTS: &'static [::daudio_sdk::nih_plug::prelude::AudioIOLayout] =
+                &[::daudio_sdk::nih_plug::prelude::AudioIOLayout {
                     main_input_channels: ::std::num::NonZeroU32::new(2),
                     main_output_channels: ::std::num::NonZeroU32::new(2),
-                    ..nih_plug::prelude::AudioIOLayout::const_default()
+                    ..::daudio_sdk::nih_plug::prelude::AudioIOLayout::const_default()
                 }];
 
             const SAMPLE_ACCURATE_AUTOMATION: bool = true;
@@ -191,31 +205,31 @@ pub fn daudio_plugin(attr: TokenStream, item: TokenStream) -> TokenStream {
             type SysExMessage = ();
             type BackgroundTask = ();
 
-            fn params(&self) -> ::std::sync::Arc<dyn nih_plug::prelude::Params> {
+            fn params(&self) -> ::std::sync::Arc<dyn ::daudio_sdk::nih_plug::prelude::Params> {
                 self.params.clone()
             }
 
             fn initialize(
                 &mut self,
-                _layout: &nih_plug::prelude::AudioIOLayout,
-                buffer_config: &nih_plug::prelude::BufferConfig,
-                _context: &mut impl nih_plug::prelude::InitContext<Self>,
+                _layout: &::daudio_sdk::nih_plug::prelude::AudioIOLayout,
+                buffer_config: &::daudio_sdk::nih_plug::prelude::BufferConfig,
+                _context: &mut impl ::daudio_sdk::nih_plug::prelude::InitContext<Self>,
             ) -> bool {
-                <Self as daudio_sdk::DaudioEffect>::activate(self, buffer_config.sample_rate);
+                <Self as ::daudio_sdk::DaudioEffect>::activate(self, buffer_config.sample_rate);
                 true
             }
 
             fn reset(&mut self) {
-                <Self as daudio_sdk::DaudioEffect>::reset(self);
+                <Self as ::daudio_sdk::DaudioEffect>::reset(self);
             }
 
             fn process(
                 &mut self,
-                buffer: &mut nih_plug::prelude::Buffer,
-                _aux: &mut nih_plug::prelude::AuxiliaryBuffers,
-                _context: &mut impl nih_plug::prelude::ProcessContext<Self>,
-            ) -> nih_plug::prelude::ProcessStatus {
-                <Self as daudio_sdk::DaudioEffect>::pre_block(self);
+                buffer: &mut ::daudio_sdk::nih_plug::prelude::Buffer,
+                _aux: &mut ::daudio_sdk::nih_plug::prelude::AuxiliaryBuffers,
+                _context: &mut impl ::daudio_sdk::nih_plug::prelude::ProcessContext<Self>,
+            ) -> ::daudio_sdk::nih_plug::prelude::ProcessStatus {
+                <Self as ::daudio_sdk::DaudioEffect>::pre_block(self);
 
                 for mut frame in buffer.iter_samples() {
                     if frame.len() < 2 {
@@ -224,33 +238,33 @@ pub fn daudio_plugin(attr: TokenStream, item: TokenStream) -> TokenStream {
                     let l = *frame.get_mut(0).unwrap();
                     let r = *frame.get_mut(1).unwrap();
                     let (ol, or) =
-                        <Self as daudio_sdk::DaudioEffect>::process_frame(self, l, r);
+                        <Self as ::daudio_sdk::DaudioEffect>::process_frame(self, l, r);
                     *frame.get_mut(0).unwrap() = ol;
                     *frame.get_mut(1).unwrap() = or;
                 }
-                nih_plug::prelude::ProcessStatus::Normal
+                ::daudio_sdk::nih_plug::prelude::ProcessStatus::Normal
             }
         }
 
-        impl nih_plug::prelude::ClapPlugin for #ident {
+        impl ::daudio_sdk::nih_plug::prelude::ClapPlugin for #ident {
             const CLAP_ID: &'static str = #clap_id;
             const CLAP_DESCRIPTION: ::std::option::Option<&'static str> = #clap_description_ts;
             const CLAP_MANUAL_URL: ::std::option::Option<&'static str> =
-                ::std::option::Option::Some(<Self as nih_plug::prelude::Plugin>::URL);
+                ::std::option::Option::Some(<Self as ::daudio_sdk::nih_plug::prelude::Plugin>::URL);
             const CLAP_SUPPORT_URL: ::std::option::Option<&'static str> =
                 ::std::option::Option::None;
-            const CLAP_FEATURES: &'static [nih_plug::prelude::ClapFeature] =
+            const CLAP_FEATURES: &'static [::daudio_sdk::nih_plug::prelude::ClapFeature] =
                 &[#(#clap_features_ts),*];
         }
 
-        impl nih_plug::prelude::Vst3Plugin for #ident {
+        impl ::daudio_sdk::nih_plug::prelude::Vst3Plugin for #ident {
             const VST3_CLASS_ID: [u8; 16] = *#vst3_id_bytes;
-            const VST3_SUBCATEGORIES: &'static [nih_plug::prelude::Vst3SubCategory] =
+            const VST3_SUBCATEGORIES: &'static [::daudio_sdk::nih_plug::prelude::Vst3SubCategory] =
                 &[#(#vst3_categories_ts),*];
         }
 
-        nih_plug::nih_export_clap!(#ident);
-        nih_plug::nih_export_vst3!(#ident);
+        ::daudio_sdk::nih_plug::nih_export_clap!(#ident);
+        ::daudio_sdk::nih_plug::nih_export_vst3!(#ident);
     };
 
     expanded.into()
