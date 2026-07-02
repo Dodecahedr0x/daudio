@@ -25,6 +25,15 @@ pub struct PitchTracker {
     hop_counter: usize,
     sample_rate: usize,
 }
+// SAFETY: `McLeodDetector`'s internal `BufferPool` uses `Rc<RefCell<Vec<_>>>`
+// scratch buffers, so `PitchTracker` is not `Send` by default. Those `Rc`s are
+// private to the tracker and never cloned or handed out, so the whole object
+// graph has a single owner and always moves together. `PitchTracker` is not
+// `Sync` and is only ever touched from one thread at a time, so satisfying the
+// `Plugin: Send` bound (which moves — never shares — the plugin between threads)
+// cannot cause concurrent access to a non-atomic refcount.
+unsafe impl Send for PitchTracker {}
+
 impl Default for PitchTracker {
     fn default() -> Self {
         Self::new()

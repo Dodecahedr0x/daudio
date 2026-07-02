@@ -3,3 +3,6 @@ name = "daudio Filter"
 
 [synth]
 name = "daudio Synth"
+
+[pitch-to-midi]
+name = "daudio Pitch2MIDI"
