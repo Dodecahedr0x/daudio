@@ -88,6 +88,8 @@ pub struct PitchToMidiParams {
     sensitivity: FloatParam,
     #[id = "hold"]
     hold: FloatParam,
+    #[id = "bend"]
+    pitch_bend: BoolParam,
     #[persist = "editor-state"]
     editor_state: Arc<nih_plug_vizia::ViziaState>,
 }
@@ -127,7 +129,8 @@ impl Default for PitchToMidiParams {
                 },
             )
             .with_unit(" ms"),
-            editor_state: daudio_ui::editor_state(640, 320),
+            pitch_bend: BoolParam::new("Pitch Bend", false),
+            editor_state: daudio_ui::editor_state(640, 360),
         }
     }
 }
@@ -182,6 +185,11 @@ pub struct PitchToMidi {
     level: f32,
     level_decay: f32,
     sample_rate: f32,
+    /// The MIDI note currently sounding (mirrors the trigger), used as the
+    /// reference pitch for optional pitch-bend output.
+    active_note: Option<u8>,
+    /// Last pitch-bend value emitted, to avoid resending unchanged bends.
+    last_bend: f32,
     detected: Arc<AtomicI32>,
     output: Arc<AtomicI32>,
 }
@@ -195,6 +203,8 @@ impl Default for PitchToMidi {
             level: 0.0,
             level_decay: 0.0,
             sample_rate: 44_100.0,
+            active_note: None,
+            last_bend: 0.5,
             detected: Arc::new(AtomicI32::new(-1)),
             output: Arc::new(AtomicI32::new(-1)),
         }
@@ -209,12 +219,16 @@ impl DaudioAudioToMidi for PitchToMidi {
         self.sample_rate = sample_rate;
         self.level_decay = (-1.0 / (0.05 * sample_rate)).exp();
         self.level = 0.0;
+        self.active_note = None;
+        self.last_bend = 0.5;
     }
 
     fn reset(&mut self) {
         self.tracker.reset();
         self.trigger.reset();
         self.level = 0.0;
+        self.active_note = None;
+        self.last_bend = 0.5;
     }
 
     fn process_sample(&mut self, input: f32, timing: u32, emit: &mut dyn FnMut(NoteEvent<()>)) {
@@ -237,23 +251,59 @@ impl DaudioAudioToMidi for PitchToMidi {
             };
             let velocity = self.level.clamp(0.0, 1.0);
             self.output.store(target.unwrap_or(-1), Relaxed);
+            // Track the sounding note out of the closure: `on_hop` borrows
+            // `self.trigger` mutably, so the closure captures a local mirror
+            // instead of `self.active_note`, which we write back afterwards.
+            let mut new_active = self.active_note;
             self.trigger
                 .on_hop(target, velocity, &mut |action| match action {
-                    NoteAction::On { note, velocity } => emit(NoteEvent::NoteOn {
-                        timing,
-                        voice_id: None,
-                        channel: 0,
-                        note,
-                        velocity,
-                    }),
-                    NoteAction::Off { note } => emit(NoteEvent::NoteOff {
-                        timing,
-                        voice_id: None,
-                        channel: 0,
-                        note,
-                        velocity: 0.0,
-                    }),
+                    NoteAction::On { note, velocity } => {
+                        new_active = Some(note);
+                        emit(NoteEvent::NoteOn {
+                            timing,
+                            voice_id: None,
+                            channel: 0,
+                            note,
+                            velocity,
+                        });
+                    }
+                    NoteAction::Off { note } => {
+                        new_active = None;
+                        emit(NoteEvent::NoteOff {
+                            timing,
+                            voice_id: None,
+                            channel: 0,
+                            note,
+                            velocity: 0.0,
+                        });
+                    }
                 });
+            self.active_note = new_active;
+
+            // Optional pitch bend: track the detected pitch relative to the
+            // held note over a +/-2 semitone range, resending only on change.
+            if self.params.pitch_bend.value() {
+                if let (Some(note), Detection::Pitch(f)) = (self.active_note, detection) {
+                    let value = daudio_dsp::notes::bend_value(f, note);
+                    if (value - self.last_bend).abs() > 1e-4 {
+                        emit(NoteEvent::MidiPitchBend {
+                            timing,
+                            channel: 0,
+                            value,
+                        });
+                        self.last_bend = value;
+                    }
+                }
+            }
+            // Recenter the bend once when no note is held.
+            if self.active_note.is_none() && (self.last_bend - 0.5).abs() > 1e-4 {
+                emit(NoteEvent::MidiPitchBend {
+                    timing,
+                    channel: 0,
+                    value: 0.5,
+                });
+                self.last_bend = 0.5;
+            }
         }
     }
 
