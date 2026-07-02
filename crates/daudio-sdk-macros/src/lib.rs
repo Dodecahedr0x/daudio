@@ -19,6 +19,9 @@ struct PluginArgs {
     /// When true, generate a SYNTH (MIDI) `Plugin` impl delegating to
     /// `DaudioSynth`; otherwise the effect impl delegating to `DaudioEffect`.
     midi: bool,
+    /// When true, generate an audio→MIDI `Plugin` impl delegating to
+    /// `DaudioAudioToMidi`. Mutually exclusive with `midi`.
+    midi_out: bool,
 }
 
 /// A single `key = value` entry in the attribute list. `value` is either a
@@ -67,6 +70,7 @@ impl Parse for PluginArgs {
         let mut clap_features = None;
         let mut vst3_categories = None;
         let mut midi = None;
+        let mut midi_out = None;
 
         for arg in args {
             let key = arg.key;
@@ -96,6 +100,7 @@ impl Parse for PluginArgs {
                 ("clap_features", ArgValue::Idents(v)) => assign!(clap_features, v),
                 ("vst3_categories", ArgValue::Idents(v)) => assign!(vst3_categories, v),
                 ("midi", ArgValue::Bool(b)) => assign!(midi, b.value()),
+                ("midi_out", ArgValue::Bool(b)) => assign!(midi_out, b.value()),
                 (other, _) => {
                     return Err(syn::Error::new(
                         key.span(),
@@ -135,6 +140,7 @@ impl Parse for PluginArgs {
                 )
             })?,
             midi: midi.unwrap_or(false),
+            midi_out: midi_out.unwrap_or(false),
         })
     }
 }
@@ -169,7 +175,18 @@ pub fn daudio_plugin(attr: TokenStream, item: TokenStream) -> TokenStream {
         clap_features,
         vst3_categories,
         midi,
+        midi_out,
     } = args;
+
+    // `midi` (synth) and `midi_out` (audio→MIDI) are mutually exclusive.
+    if midi && midi_out {
+        return syn::Error::new(
+            proc_macro2::Span::call_site(),
+            "`daudio_plugin` cannot set both `midi` and `midi_out`",
+        )
+        .to_compile_error()
+        .into();
+    }
 
     let url_ts: TokenStream2 = match &url {
         Some(u) => quote! { #u },
@@ -194,10 +211,87 @@ pub fn daudio_plugin(attr: TokenStream, item: TokenStream) -> TokenStream {
     let vst3_id_bytes = LitByteStr::new(vst3_id_value.as_bytes(), vst3_id.span());
 
     // The `Plugin` impl differs between effects (stereo in/out, delegating to
-    // `DaudioEffect`) and synths (MIDI-in, no audio input, stereo out,
-    // delegating to `DaudioSynth`). Everything else (Clap/Vst3/exports) is
-    // identical. Select the two differing halves here.
-    let plugin_impl = if midi {
+    // `DaudioEffect`), synths (MIDI-in, no audio input, stereo out, delegating
+    // to `DaudioSynth`), and audio→MIDI analyzers (stereo in/out passthrough +
+    // MIDI out, delegating to `DaudioAudioToMidi`). Everything else
+    // (Clap/Vst3/exports) is identical. Select the differing half here.
+    let plugin_impl = if midi_out {
+        quote! {
+            impl ::daudio_sdk::nih_plug::prelude::Plugin for #ident {
+                const NAME: &'static str = #name;
+                const VENDOR: &'static str = #vendor;
+                const URL: &'static str = #url_ts;
+                const EMAIL: &'static str = #email_ts;
+                const VERSION: &'static str = env!("CARGO_PKG_VERSION");
+
+                const AUDIO_IO_LAYOUTS: &'static [::daudio_sdk::nih_plug::prelude::AudioIOLayout] =
+                    &[::daudio_sdk::nih_plug::prelude::AudioIOLayout {
+                        main_input_channels: ::std::num::NonZeroU32::new(2),
+                        main_output_channels: ::std::num::NonZeroU32::new(2),
+                        ..::daudio_sdk::nih_plug::prelude::AudioIOLayout::const_default()
+                    }];
+
+                const MIDI_OUTPUT: ::daudio_sdk::nih_plug::prelude::MidiConfig =
+                    ::daudio_sdk::nih_plug::prelude::MidiConfig::Basic;
+
+                const SAMPLE_ACCURATE_AUTOMATION: bool = true;
+
+                type SysExMessage = ();
+                type BackgroundTask = ();
+
+                fn params(&self) -> ::std::sync::Arc<dyn ::daudio_sdk::nih_plug::prelude::Params> {
+                    self.params.clone()
+                }
+
+                fn initialize(
+                    &mut self,
+                    _layout: &::daudio_sdk::nih_plug::prelude::AudioIOLayout,
+                    buffer_config: &::daudio_sdk::nih_plug::prelude::BufferConfig,
+                    _context: &mut impl ::daudio_sdk::nih_plug::prelude::InitContext<Self>,
+                ) -> bool {
+                    <Self as ::daudio_sdk::DaudioAudioToMidi>::activate(self, buffer_config.sample_rate);
+                    true
+                }
+
+                fn reset(&mut self) {
+                    <Self as ::daudio_sdk::DaudioAudioToMidi>::reset(self);
+                }
+
+                fn editor(
+                    &mut self,
+                    _async_executor: ::daudio_sdk::nih_plug::prelude::AsyncExecutor<Self>,
+                ) -> ::std::option::Option<
+                    ::std::boxed::Box<dyn ::daudio_sdk::nih_plug::prelude::Editor>,
+                > {
+                    <Self as ::daudio_sdk::DaudioAudioToMidi>::editor(self)
+                }
+
+                fn process(
+                    &mut self,
+                    buffer: &mut ::daudio_sdk::nih_plug::prelude::Buffer,
+                    _aux: &mut ::daudio_sdk::nih_plug::prelude::AuxiliaryBuffers,
+                    context: &mut impl ::daudio_sdk::nih_plug::prelude::ProcessContext<Self>,
+                ) -> ::daudio_sdk::nih_plug::prelude::ProcessStatus {
+                    for (sample_id, mut channel_samples) in buffer.iter_samples().enumerate() {
+                        let mut sum = 0.0f32;
+                        let mut count = 0u32;
+                        for s in channel_samples.iter_mut() {
+                            sum += *s;
+                            count += 1;
+                        }
+                        let mono = if count > 0 { sum / count as f32 } else { 0.0 };
+                        <Self as ::daudio_sdk::DaudioAudioToMidi>::process_sample(
+                            self,
+                            mono,
+                            sample_id as u32,
+                            &mut |event| context.send_event(event),
+                        );
+                    }
+                    ::daudio_sdk::nih_plug::prelude::ProcessStatus::Normal
+                }
+            }
+        }
+    } else if midi {
         quote! {
             impl ::daudio_sdk::nih_plug::prelude::Plugin for #ident {
                 const NAME: &'static str = #name;
