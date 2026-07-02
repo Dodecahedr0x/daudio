@@ -101,7 +101,8 @@ impl DaudioEffect for FilterPlugin {
                 .class("daudio-panel")
                 // Guaranteed background + fill even if the stylesheet fails to
                 // apply, so the editor never renders as a bare white window.
-                .background_color(Color::rgb(0x1c, 0x1c, 0x22))
+                // Matches the theme `BG` (#16161c).
+                .background_color(Color::rgb(0x16, 0x16, 0x1c))
                 .width(Percentage(100.0))
                 .height(Percentage(100.0));
             },
