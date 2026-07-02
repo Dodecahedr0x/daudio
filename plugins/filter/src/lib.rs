@@ -18,7 +18,7 @@ pub struct FilterParams {
 impl Default for FilterParams {
     fn default() -> Self {
         Self {
-            editor_state: daudio_ui::editor_state(300, 160),
+            editor_state: daudio_ui::editor_state(300, 240),
             cutoff: hz_param("Cutoff", 1000.0, 20.0, 20_000.0),
             gain: db_gain_param("Gain", -60.0, 6.0, 0.0),
         }
@@ -73,7 +73,8 @@ impl DaudioEffect for FilterPlugin {
             move |cx| {
                 VStack::new(cx, |cx| {
                     Label::new(cx, "daudio Filter").class("daudio-title");
-                    HStack::new(cx, |cx| {
+                    VStack::new(cx, |cx| {
+                        Label::new(cx, "FILTER").class("daudio-section");
                         HStack::new(cx, |cx| {
                             ParamControl::new(
                                 cx,
@@ -87,11 +88,15 @@ impl DaudioEffect for FilterPlugin {
                                 DaudioData::<FilterParams>::params,
                                 |p| &p.gain,
                             );
+                            VStack::new(cx, |cx| {
+                                Meter::new(cx, meter.clone());
+                                Label::new(cx, "OUT").class("daudio-label");
+                            })
+                            .class("daudio-control");
                         })
                         .class("daudio-row");
-                        Meter::new(cx, meter.clone());
                     })
-                    .class("daudio-row");
+                    .class("daudio-card");
                 })
                 .class("daudio-panel")
                 // Guaranteed background + fill even if the stylesheet fails to

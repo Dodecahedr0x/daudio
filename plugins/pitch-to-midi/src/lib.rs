@@ -130,7 +130,7 @@ impl Default for PitchToMidiParams {
             )
             .with_unit(" ms"),
             pitch_bend: BoolParam::new("Pitch Bend", false),
-            editor_state: daudio_ui::editor_state(640, 360),
+            editor_state: daudio_ui::editor_state(660, 320),
         }
     }
 }
@@ -461,77 +461,91 @@ fn build_editor(
     VStack::new(cx, move |cx| {
         Label::new(cx, "daudio Pitch2MIDI").class("daudio-title");
 
-        // Root selector: ParamSlider works over the `EnumParam<Root>`.
-        HStack::new(cx, |cx| {
-            Label::new(cx, "Root").class("daudio-label");
-            ParamSlider::new(cx, DaudioData::<PitchToMidiParams>::params, |p| &p.root);
-        })
-        .class("daudio-row");
+        // Scale card: root selector, the twelve note toggles, and the presets.
+        VStack::new(cx, move |cx| {
+            Label::new(cx, "SCALE").class("daudio-section");
 
-        // Scale editor: twelve note toggles sharing the root lens.
-        HStack::new(cx, move |cx| {
-            macro_rules! toggle {
-                ($field:ident, $deg:expr) => {
-                    NoteToggle::new(
+            // Root selector: ParamSlider works over the `EnumParam<Root>`.
+            HStack::new(cx, |cx| {
+                Label::new(cx, "Root").class("daudio-label");
+                ParamSlider::new(cx, DaudioData::<PitchToMidiParams>::params, |p| &p.root);
+            })
+            .class("daudio-row");
+
+            // Scale editor: twelve note toggles sharing the root lens.
+            HStack::new(cx, move |cx| {
+                macro_rules! toggle {
+                    ($field:ident, $deg:expr) => {
+                        NoteToggle::new(
+                            cx,
+                            DaudioData::<PitchToMidiParams>::params,
+                            |p| &p.$field,
+                            $deg,
+                            root_lens,
+                        );
+                    };
+                }
+                toggle!(degree_0, 0);
+                toggle!(degree_1, 1);
+                toggle!(degree_2, 2);
+                toggle!(degree_3, 3);
+                toggle!(degree_4, 4);
+                toggle!(degree_5, 5);
+                toggle!(degree_6, 6);
+                toggle!(degree_7, 7);
+                toggle!(degree_8, 8);
+                toggle!(degree_9, 9);
+                toggle!(degree_10, 10);
+                toggle!(degree_11, 11);
+            })
+            .class("daudio-row");
+
+            // Preset buttons: each writes its pattern to the degree params.
+            HStack::new(cx, move |cx| {
+                for &(name, degrees) in PRESETS {
+                    let params = params.clone();
+                    Button::new(
                         cx,
-                        DaudioData::<PitchToMidiParams>::params,
-                        |p| &p.$field,
-                        $deg,
-                        root_lens,
+                        move |cx| apply_preset(cx, &params, degrees),
+                        move |cx| Label::new(cx, name),
                     );
-                };
-            }
-            toggle!(degree_0, 0);
-            toggle!(degree_1, 1);
-            toggle!(degree_2, 2);
-            toggle!(degree_3, 3);
-            toggle!(degree_4, 4);
-            toggle!(degree_5, 5);
-            toggle!(degree_6, 6);
-            toggle!(degree_7, 7);
-            toggle!(degree_8, 8);
-            toggle!(degree_9, 9);
-            toggle!(degree_10, 10);
-            toggle!(degree_11, 11);
+                }
+            })
+            .class("daudio-row");
         })
-        .class("daudio-row");
+        .class("daudio-card");
 
-        // Preset buttons: each writes its pattern to the degree params.
-        HStack::new(cx, move |cx| {
-            for &(name, degrees) in PRESETS {
-                let params = params.clone();
-                Button::new(
+        // Detection card: sensitivity + hold knobs and the pitch-bend toggle.
+        VStack::new(cx, |cx| {
+            Label::new(cx, "DETECTION").class("daudio-section");
+            HStack::new(cx, |cx| {
+                ParamControl::new(
                     cx,
-                    move |cx| apply_preset(cx, &params, degrees),
-                    move |cx| Label::new(cx, name),
+                    "Sensitivity",
+                    DaudioData::<PitchToMidiParams>::params,
+                    |p| &p.sensitivity,
                 );
-            }
+                ParamControl::new(cx, "Hold", DaudioData::<PitchToMidiParams>::params, |p| {
+                    &p.hold
+                });
+                ParamButton::new(cx, DaudioData::<PitchToMidiParams>::params, |p| {
+                    &p.pitch_bend
+                });
+            })
+            .class("daudio-row");
         })
-        .class("daudio-row");
+        .class("daudio-card");
 
-        // Knobs.
-        HStack::new(cx, |cx| {
-            ParamControl::new(
-                cx,
-                "Sensitivity",
-                DaudioData::<PitchToMidiParams>::params,
-                |p| &p.sensitivity,
-            );
-            ParamControl::new(cx, "Hold", DaudioData::<PitchToMidiParams>::params, |p| {
-                &p.hold
-            });
-            ParamButton::new(cx, DaudioData::<PitchToMidiParams>::params, |p| {
-                &p.pitch_bend
-            });
+        // Readout footer: a draw()-based leaf reading the shared atomics every
+        // frame (baseview redraws each frame; vizia timers are inert).
+        VStack::new(cx, move |cx| {
+            Label::new(cx, "DETECTED → OUT").class("daudio-section");
+            HStack::new(cx, move |cx| {
+                NoteReadout::new(cx, detected, output);
+            })
+            .class("daudio-row");
         })
-        .class("daudio-row");
-
-        // Note-name readout: a draw()-based leaf reading the shared atomics
-        // every frame (baseview redraws each frame; vizia timers are inert).
-        HStack::new(cx, move |cx| {
-            NoteReadout::new(cx, detected, output);
-        })
-        .class("daudio-row");
+        .class("daudio-card");
     })
     .class("daudio-panel")
     // Guaranteed background even if the stylesheet fails to apply, so the editor
