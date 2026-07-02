@@ -232,7 +232,7 @@ pub fn daudio_plugin(attr: TokenStream, item: TokenStream) -> TokenStream {
                     }];
 
                 const MIDI_OUTPUT: ::daudio_sdk::nih_plug::prelude::MidiConfig =
-                    ::daudio_sdk::nih_plug::prelude::MidiConfig::Basic;
+                    ::daudio_sdk::nih_plug::prelude::MidiConfig::MidiCCs;
 
                 const SAMPLE_ACCURATE_AUTOMATION: bool = true;
 
