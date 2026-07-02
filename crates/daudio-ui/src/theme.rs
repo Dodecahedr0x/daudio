@@ -3,9 +3,12 @@
 use nih_plug_vizia::vizia::prelude::*;
 use nih_plug_vizia::vizia::vg;
 
-/// Suite accent — the single branding source for canvas-drawn widgets.
+/// Suite accent — the single branding source for the canvas-drawn widgets
+/// ([`crate::Knob`], [`crate::Meter`]).
 ///
-/// `rgb(94, 139, 255)` ≈ `#5e8bff`, matching the `.daudio-*` CSS accents.
+/// `rgb(94, 139, 255)` ≈ `#5e8bff`. NOTE: the `.daudio-*` rules in `theme.css`
+/// hard-code this same hex separately — CSS-styled and canvas-drawn widgets do
+/// not share one literal. Keep the two in sync by hand if the brand changes.
 pub const ACCENT: vg::Color = vg::Color {
     r: 0.369,
     g: 0.545,

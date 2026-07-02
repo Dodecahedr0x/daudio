@@ -3,9 +3,17 @@
 //! Leaf view that reads a [`PeakLevel`] channel (written by the audio thread)
 //! and draws a bottom-anchored fill bar. Unlike the [`crate::Knob`], the meter
 //! has no lens to react to: nothing in the vizia data graph changes when the
-//! audio thread updates the level. So we drive repaints with a repeating timer
-//! that calls `needs_redraw()` each tick, mirroring the approach used to keep
-//! `nih_plug_vizia`'s own animated widgets ticking.
+//! audio thread updates the level.
+//!
+//! What actually repaints the meter today: `nih_plug_vizia` runs on the
+//! `vizia_baseview` backend, which redraws the whole editor every frame
+//! unconditionally (it never gates `draw()` on a dirty flag). So the bar
+//! animates for free while the editor is open.
+//!
+//! The repeating timer below is therefore forward-insurance, not the current
+//! driver: on a damage-driven backend (e.g. `vizia_winit`, which *does* gate
+//! drawing on `needs_redraw()` and *does* tick timers) it is what would keep
+//! the lens-less meter animating. Under baseview it is inert but harmless.
 
 use std::time::Duration;
 
@@ -15,7 +23,9 @@ use nih_plug_vizia::vizia::vg;
 
 /// The dBFS value mapped to an empty bar (bottom of the meter).
 const MIN_DB: f32 = -60.0;
-/// Repaint interval — ~30 fps, enough for a smooth meter without burning CPU.
+/// Timer interval for the forward-insurance repaint driver (~30 fps). Inert
+/// under `vizia_baseview` (which redraws every frame regardless); only matters
+/// on a damage-driven backend. See the module docs.
 const REDRAW_INTERVAL: Duration = Duration::from_millis(33);
 
 /// A vertical peak-level meter bound to a [`PeakLevel`] channel.
@@ -24,12 +34,11 @@ pub struct Meter {
 }
 
 impl Meter {
-    /// Build a meter reading from `level`. Starts a repeating repaint timer so
-    /// the bar animates as the audio thread writes new peaks.
+    /// Build a meter reading from `level`. Registers a repaint timer as
+    /// forward-insurance for damage-driven backends (see module docs); under
+    /// the baseview backend the editor already redraws every frame.
     pub fn new(cx: &mut Context, level: PeakLevel) -> Handle<'_, Self> {
         Self { level }.build(cx, |cx| {
-            // Drive ~30 fps repaints so the meter animates without a lens. The
-            // callback fires on every tick and just marks the view dirty.
             let timer = cx.add_timer(REDRAW_INTERVAL, None, |cx, action| {
                 if let TimerAction::Tick(_) = action {
                     cx.needs_redraw();
