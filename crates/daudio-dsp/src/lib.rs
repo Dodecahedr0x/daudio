@@ -1,5 +1,6 @@
 //! daudio-dsp: pure, host-agnostic DSP primitives.
 
+pub mod adsr;
 pub mod biquad;
 pub mod gain;
 pub mod oscillator;
