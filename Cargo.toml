@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/daudio-dsp"]
+members = ["crates/daudio-dsp", "plugins/filter"]
 
 [workspace.package]
 edition = "2021"
