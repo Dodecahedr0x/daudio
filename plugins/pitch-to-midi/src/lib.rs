@@ -9,7 +9,7 @@ use daudio_ui::nih_plug_vizia;
 use daudio_ui::nih_plug_vizia::assets::fonts;
 use daudio_ui::nih_plug_vizia::vizia::vg;
 use daudio_ui::nih_plug_vizia::widgets::param_base::ParamWidgetBase;
-use daudio_ui::nih_plug_vizia::widgets::{ParamSlider, RawParamEvent};
+use daudio_ui::nih_plug_vizia::widgets::{ParamButton, ParamSlider, RawParamEvent};
 use daudio_ui::prelude::*;
 use std::cell::Cell;
 use std::sync::atomic::{AtomicI32, Ordering::Relaxed};
@@ -519,6 +519,9 @@ fn build_editor(
             );
             ParamControl::new(cx, "Hold", DaudioData::<PitchToMidiParams>::params, |p| {
                 &p.hold
+            });
+            ParamButton::new(cx, DaudioData::<PitchToMidiParams>::params, |p| {
+                &p.pitch_bend
             });
         })
         .class("daudio-row");
