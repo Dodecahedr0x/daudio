@@ -17,7 +17,11 @@ pub enum Detection {
     NoPitch,
 }
 
-pub struct PitchTracker {
+/// Synchronous core of the pitch tracker. Holds the (`!Send`, because
+/// `McLeodDetector` keeps `Rc`-backed scratch pools) detector and runs the
+/// hop-gated windowed detection inline. Never crosses a thread boundary: the
+/// threaded `PitchTracker` constructs one on its worker thread.
+pub(crate) struct PitchDetectorCore {
     detector: McLeodDetector<f32>,
     ring: Vec<f32>,
     scratch: Vec<f32>,
@@ -25,31 +29,9 @@ pub struct PitchTracker {
     hop_counter: usize,
     sample_rate: usize,
 }
-// SAFETY: `McLeodDetector`'s internal `BufferPool` holds `Rc<RefCell<Vec<_>>>`
-// scratch buffers (non-atomic refcounts), so `PitchTracker` is not `Send` by
-// default. Granting `Send` (and ONLY `Send` — not `Sync`) is sound here because:
-//   1. No `Rc` clone ever escapes the object graph. `get_pitch` does clone the
-//      pooled `Rc`s internally to loan buffers, but those clones are locals that
-//      drop before it returns, so between calls every `Rc` is back to
-//      strong_count == 1 and the whole graph has a single owner that moves as a
-//      unit. Two threads can therefore never hold clones of the same allocation.
-//   2. Access is `&mut self`-exclusive: refcounts only mutate inside `get_pitch`
-//      (reached via `push`, which takes `&mut self`), and nih-plug never calls
-//      `process`/`reset`/`initialize` concurrently — so refcount mutation is
-//      serialized regardless of which thread owns the tracker.
-//   3. `PitchTracker` stays `!Sync`, so `&PitchTracker` can't be shared across
-//      threads; satisfying `Plugin: Send` only ever *moves* the plugin.
-//   4. `pitch-detection`/`rustfft` spawn no threads (single-threaded FFT), so
-//      there is no hidden concurrent access to the pool.
-unsafe impl Send for PitchTracker {}
 
-impl Default for PitchTracker {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-impl PitchTracker {
-    pub fn new() -> Self {
+impl PitchDetectorCore {
+    pub(crate) fn new() -> Self {
         Self {
             detector: McLeodDetector::new(WINDOW, PADDING),
             ring: vec![0.0; WINDOW],
@@ -59,15 +41,15 @@ impl PitchTracker {
             sample_rate: 48_000,
         }
     }
-    pub fn set_sample_rate(&mut self, sample_rate: f32) {
+    pub(crate) fn set_sample_rate(&mut self, sample_rate: f32) {
         self.sample_rate = sample_rate as usize;
     }
-    pub fn reset(&mut self) {
+    pub(crate) fn reset(&mut self) {
         self.ring.iter_mut().for_each(|s| *s = 0.0);
         self.write = 0;
         self.hop_counter = 0;
     }
-    pub fn push(&mut self, sample: f32) -> Option<Detection> {
+    pub(crate) fn push(&mut self, sample: f32) -> Option<Detection> {
         self.ring[self.write] = sample;
         self.write = (self.write + 1) % WINDOW;
         self.hop_counter += 1;
@@ -101,7 +83,7 @@ mod tests {
     fn detects_a_sine_frequency() {
         let sr = 44_100.0;
         let freq = 220.0;
-        let mut t = PitchTracker::new();
+        let mut t = PitchDetectorCore::new();
         t.set_sample_rate(sr);
         let mut last = Detection::NoPitch;
         for n in 0..(WINDOW * 4) {
@@ -119,7 +101,7 @@ mod tests {
     }
     #[test]
     fn silence_is_no_pitch() {
-        let mut t = PitchTracker::new();
+        let mut t = PitchDetectorCore::new();
         t.set_sample_rate(44_100.0);
         let mut got = None;
         for _ in 0..(WINDOW * 2) {
