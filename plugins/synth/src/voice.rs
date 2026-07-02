@@ -13,6 +13,22 @@ const ENV_CUTOFF_RANGE: f32 = 6.0;
 /// Highest cutoff we ever ask the biquad for, to stay clear of Nyquist.
 const MAX_CUTOFF_HZ: f32 = 18_000.0;
 
+/// Snapshot of the per-voice configuration, refreshed each block from the
+/// params and pushed into voices. Applied to a voice both in `pre_block` (for
+/// live edits on sounding voices) and at note-on (so a fresh or stolen voice is
+/// correctly configured on its very first sample).
+#[derive(Clone, Copy)]
+pub struct VoiceConfig {
+    pub waveform: Waveform,
+    pub cutoff: f32,
+    pub resonance: f32,
+    pub env_amount: f32,
+    pub attack: f32,
+    pub decay: f32,
+    pub sustain: f32,
+    pub release: f32,
+}
+
 /// One subtractive voice: saw/sine oscillator into an RBJ lowpass, shaped by an
 /// amplitude ADSR that also modulates the filter cutoff.
 pub struct SynthVoice {
@@ -25,7 +41,6 @@ pub struct SynthVoice {
     resonance: f32,
     env_amount: f32,
 
-    active: bool,
     note: u8,
     sample_rate: f32,
 }
@@ -39,7 +54,6 @@ impl Default for SynthVoice {
             base_cutoff_hz: 1_000.0,
             resonance: 0.707,
             env_amount: 0.5,
-            active: false,
             note: 0,
             sample_rate: 48_000.0,
         }
@@ -47,15 +61,25 @@ impl Default for SynthVoice {
 }
 
 impl SynthVoice {
+    /// Apply a full configuration snapshot. Single entry point used by both the
+    /// synth's `pre_block` (live edits on sounding voices) and note-on (so a
+    /// fresh/stolen voice is correct on its very first sample).
+    pub fn apply_config(&mut self, cfg: &VoiceConfig) {
+        self.set_waveform(cfg.waveform);
+        self.set_filter(cfg.cutoff, cfg.resonance);
+        self.set_env_amount(cfg.env_amount);
+        self.set_adsr(cfg.attack, cfg.decay, cfg.sustain, cfg.release);
+    }
+
     /// Select the oscillator waveform.
-    pub fn set_waveform(&mut self, waveform: Waveform) {
+    fn set_waveform(&mut self, waveform: Waveform) {
         self.osc.set_waveform(waveform);
     }
 
     /// Set base cutoff (Hz) and resonance (Q). Q is only fixable at
     /// construction, so a resonance change rebuilds the biquad; its state is
     /// harmlessly cleared (voices reset their filter on note-on anyway).
-    pub fn set_filter(&mut self, cutoff_hz: f32, resonance: f32) {
+    fn set_filter(&mut self, cutoff_hz: f32, resonance: f32) {
         self.base_cutoff_hz = cutoff_hz;
         if (resonance - self.resonance).abs() > f32::EPSILON {
             self.resonance = resonance;
@@ -65,12 +89,12 @@ impl SynthVoice {
     }
 
     /// How strongly the envelope opens the filter (0..1).
-    pub fn set_env_amount(&mut self, env_amount: f32) {
+    fn set_env_amount(&mut self, env_amount: f32) {
         self.env_amount = env_amount;
     }
 
     /// Set the amplitude envelope times (seconds) and sustain (0..1).
-    pub fn set_adsr(&mut self, attack: f32, decay: f32, sustain: f32, release: f32) {
+    fn set_adsr(&mut self, attack: f32, decay: f32, sustain: f32, release: f32) {
         self.adsr.set_params(attack, decay, sustain, release);
     }
 }
@@ -89,7 +113,6 @@ impl Voice for SynthVoice {
         self.note = note;
         self.filter.reset();
         self.adsr.trigger();
-        self.active = true;
     }
 
     fn note_off(&mut self) {
@@ -106,7 +129,6 @@ impl Voice for SynthVoice {
 
     fn render(&mut self) -> f32 {
         if !self.is_active() {
-            self.active = false;
             return 0.0;
         }
         let raw = self.osc.next_sample();

@@ -42,6 +42,13 @@ impl<V: Voice> VoiceManager<V> {
     /// Allocate a voice for `note`, reusing a free voice if one exists,
     /// otherwise stealing the oldest.
     pub fn note_on(&mut self, note: u8, velocity: f32) {
+        self.note_on_with(note, velocity, |_| {});
+    }
+
+    /// Allocate/steal a voice, configure it, then trigger it. The closure runs
+    /// on the chosen voice BEFORE `note_on`, so a freshly allocated or stolen
+    /// voice starts with correct configuration on its very first sample.
+    pub fn note_on_with(&mut self, note: u8, velocity: f32, configure: impl FnOnce(&mut V)) {
         let target = self
             .voices
             .iter()
@@ -57,6 +64,7 @@ impl<V: Voice> VoiceManager<V> {
             });
         self.counter += 1;
         self.ages[target] = self.counter;
+        configure(&mut self.voices[target]);
         self.voices[target].note_on(note, velocity);
     }
 
@@ -173,6 +181,33 @@ mod tests {
         m.note_on(64, 1.0);
         assert_eq!(active_count(&mut m), 2);
         assert_eq!(m.render(), 2.0);
+    }
+
+    #[test]
+    fn note_on_with_configures_before_trigger() {
+        // The closure must run on the chosen voice BEFORE `note_on`, so a fresh
+        // voice is configured on its very first sample. TestVoice records the
+        // note it was triggered with; the closure bumps `sr` and we confirm the
+        // voice was both configured and triggered.
+        let mut m = VoiceManager::<TestVoice>::new(4);
+        let mut configured_active_at_call = true;
+        m.note_on_with(72, 1.0, |v| {
+            // At configure time the voice has NOT yet been triggered.
+            configured_active_at_call = v.is_active();
+            v.set_sample_rate(96_000.0);
+        });
+        assert!(
+            !configured_active_at_call,
+            "configure closure ran after note_on"
+        );
+        let mut seen_note = 0;
+        let mut seen_sr = 0.0;
+        m.for_each_active(|v| {
+            seen_note = v.note();
+            seen_sr = v.sr;
+        });
+        assert_eq!(seen_note, 72, "voice not triggered with the note");
+        assert_eq!(seen_sr, 96_000.0, "configure closure did not apply");
     }
 
     #[test]

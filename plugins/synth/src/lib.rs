@@ -8,7 +8,7 @@ use daudio_sdk::prelude::*;
 use daudio_ui::nih_plug_vizia;
 use daudio_ui::prelude::*;
 
-use crate::voice::SynthVoice;
+use crate::voice::{SynthVoice, VoiceConfig};
 
 /// Oscillator waveform, as a host-automatable enum parameter. Maps 1:1 onto
 /// `daudio_dsp::Waveform` (which lives in the host-agnostic DSP crate and so
@@ -92,21 +92,6 @@ impl Default for SynthParams {
     }
 }
 
-/// Snapshot of the per-voice configuration, refreshed each block and pushed
-/// into active voices. A voice triggered mid-block picks up the config on the
-/// next block's `pre_block` (a one-block, inaudible latency).
-#[derive(Clone, Copy)]
-struct VoiceConfig {
-    waveform: Waveform,
-    cutoff: f32,
-    resonance: f32,
-    env_amount: f32,
-    attack: f32,
-    decay: f32,
-    sustain: f32,
-    release: f32,
-}
-
 #[daudio_plugin(
     name = "daudio Synth",
     vendor = "daudio",
@@ -133,6 +118,23 @@ impl Default for Synth {
     }
 }
 
+impl Synth {
+    /// Build a [`VoiceConfig`] snapshot from the current parameter values.
+    /// Shared by `pre_block` (live edits) and `note_on` (fresh-voice config).
+    fn current_config(&self) -> VoiceConfig {
+        VoiceConfig {
+            waveform: self.params.waveform.value().into(),
+            cutoff: self.params.cutoff.value(),
+            resonance: self.params.resonance.value(),
+            env_amount: self.params.env_amount.value(),
+            attack: self.params.attack.value(),
+            decay: self.params.decay.value(),
+            sustain: self.params.sustain.value(),
+            release: self.params.release.value(),
+        }
+    }
+}
+
 impl DaudioSynth for Synth {
     type Params = SynthParams;
 
@@ -145,26 +147,18 @@ impl DaudioSynth for Synth {
     }
 
     fn pre_block(&mut self) {
-        let cfg = VoiceConfig {
-            waveform: self.params.waveform.value().into(),
-            cutoff: self.params.cutoff.value(),
-            resonance: self.params.resonance.value(),
-            env_amount: self.params.env_amount.value(),
-            attack: self.params.attack.value(),
-            decay: self.params.decay.value(),
-            sustain: self.params.sustain.value(),
-            release: self.params.release.value(),
-        };
-        self.voices.for_each_active(|v| {
-            v.set_waveform(cfg.waveform);
-            v.set_filter(cfg.cutoff, cfg.resonance);
-            v.set_env_amount(cfg.env_amount);
-            v.set_adsr(cfg.attack, cfg.decay, cfg.sustain, cfg.release);
-        });
+        // Push live param edits into already-sounding voices.
+        let cfg = self.current_config();
+        self.voices.for_each_active(|v| v.apply_config(&cfg));
     }
 
     fn note_on(&mut self, note: u8, velocity: f32) {
-        self.voices.note_on(note, velocity);
+        // Configure the freshly allocated (or stolen) voice BEFORE it is
+        // triggered, so its very first sample uses the current ADSR/filter
+        // settings rather than the voice's stale/default config.
+        let cfg = self.current_config();
+        self.voices
+            .note_on_with(note, velocity, move |v| v.apply_config(&cfg));
     }
 
     fn note_off(&mut self, note: u8) {
