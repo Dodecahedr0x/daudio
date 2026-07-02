@@ -44,10 +44,13 @@ decides.
 
 **New macro mode** `midi_out = true` on `#[daudio_plugin(...)]` generates a
 `Plugin` with:
-- `AUDIO_IO_LAYOUTS` = **1 channel in, 0 out** (mono input, no audio output),
+- `AUDIO_IO_LAYOUTS` = **stereo in / stereo out, audio passed through** (nih-plug
+  processes in place, so an input-only 0-output plugin has no buffer to read; we
+  pass the audio through untouched and emit MIDI alongside it),
 - `MIDI_OUTPUT = MidiConfig::Basic`,
-- a `process` loop that sums the input bus to mono, calls `process_sample`, and
-  forwards emitted events via `context.send_event(...)`.
+- a `process` loop that sums each frame to mono, calls
+  `process_sample(mono, timing, emit)`, forwards emitted events via
+  `context.send_event(...)`, and leaves the audio frame unchanged.
 
 The effect and synth codegen paths stay byte-for-byte unchanged; the mode is
 selected by the `midi_out` flag exactly as `midi` selects the synth path.
@@ -89,8 +92,12 @@ fn quantize(midi_note: i32, root: u8, degree_mask: u16) -> Option<i32>
 - **Retrigger:** when the committed note changes → note-off (old) then note-on
   (new); on gate-close → note-off.
 
-Detection never allocates on the audio thread (ring buffer and detector scratch
-are sized in `activate`).
+**Real-time caveat:** the `pitch-detection` detector reuses preallocated buffers
+but its `get_pitch` runs an FFT and collects peak vectors, so it may allocate.
+For v1 detection runs inline on the audio thread once per hop (infrequent); if
+this causes xruns, the documented follow-up is to move detection to a worker
+thread fed by a lock-free ring buffer. The quantizer and trigger are allocation-
+free.
 
 ## Parameters & UI
 
