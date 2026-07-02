@@ -59,6 +59,10 @@ impl Knob {
         }
         // Leaf view: no children, we draw everything ourselves.
         .build(cx, |_| {})
+        // Default size so the knob is visible without any stylesheet; a theme
+        // rule for `.daudio-knob` can still override these.
+        .width(Pixels(56.0))
+        .height(Pixels(56.0))
     }
 }
 

@@ -22,7 +22,10 @@ pub const ACCENT: vg::Color = vg::Color {
 /// `include_style!`); the stylesheet is embedded at compile time and its errors
 /// are logged rather than propagated, matching the upstream pattern.
 pub fn apply_theme(cx: &mut Context) {
-    if let Err(err) = cx.add_stylesheet(include_style!("src/theme.css")) {
+    // Embed the stylesheet at compile time (`&'static str: IntoCssStr`) rather
+    // than `include_style!`, whose debug-build variant reads the file from a
+    // compile-time absolute path at runtime — fragile once the crate moves.
+    if let Err(err) = cx.add_stylesheet(include_str!("theme.css")) {
         nih_plug::nih_error!("Failed to load daudio stylesheet: {err:?}");
     }
 }

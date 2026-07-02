@@ -38,14 +38,19 @@ impl Meter {
     /// forward-insurance for damage-driven backends (see module docs); under
     /// the baseview backend the editor already redraws every frame.
     pub fn new(cx: &mut Context, level: PeakLevel) -> Handle<'_, Self> {
-        Self { level }.build(cx, |cx| {
-            let timer = cx.add_timer(REDRAW_INTERVAL, None, |cx, action| {
-                if let TimerAction::Tick(_) = action {
-                    cx.needs_redraw();
-                }
-            });
-            cx.start_timer(timer);
-        })
+        Self { level }
+            .build(cx, |cx| {
+                let timer = cx.add_timer(REDRAW_INTERVAL, None, |cx, action| {
+                    if let TimerAction::Tick(_) = action {
+                        cx.needs_redraw();
+                    }
+                });
+                cx.start_timer(timer);
+            })
+            // Default size so the meter is visible without any stylesheet; a
+            // theme rule for `.daudio-meter` can still override these.
+            .width(Pixels(16.0))
+            .height(Pixels(80.0))
     }
 }
 
