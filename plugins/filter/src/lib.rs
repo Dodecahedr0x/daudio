@@ -40,7 +40,7 @@ impl Default for FilterParams {
     }
 }
 
-struct FilterPlugin {
+pub struct FilterPlugin {
     params: Arc<FilterParams>,
     core: FilterCore,
 }
