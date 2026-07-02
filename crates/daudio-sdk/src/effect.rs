@@ -19,4 +19,9 @@ pub trait DaudioEffect: Send {
 
     /// Process one stereo frame. Called per sample.
     fn process_frame(&mut self, left: f32, right: f32) -> (f32, f32);
+
+    /// Optional custom editor. Return `None` (default) for the host's generic UI.
+    fn editor(&mut self) -> Option<Box<dyn nih_plug::prelude::Editor>> {
+        None
+    }
 }

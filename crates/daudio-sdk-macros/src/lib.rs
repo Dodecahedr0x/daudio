@@ -223,6 +223,15 @@ pub fn daudio_plugin(attr: TokenStream, item: TokenStream) -> TokenStream {
                 <Self as ::daudio_sdk::DaudioEffect>::reset(self);
             }
 
+            fn editor(
+                &mut self,
+                _async_executor: ::daudio_sdk::nih_plug::prelude::AsyncExecutor<Self>,
+            ) -> ::std::option::Option<
+                ::std::boxed::Box<dyn ::daudio_sdk::nih_plug::prelude::Editor>,
+            > {
+                <Self as ::daudio_sdk::DaudioEffect>::editor(self)
+            }
+
             fn process(
                 &mut self,
                 buffer: &mut ::daudio_sdk::nih_plug::prelude::Buffer,
