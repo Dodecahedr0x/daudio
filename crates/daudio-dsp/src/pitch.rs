@@ -1,9 +1,13 @@
 //! Windowed monophonic pitch tracking over `pitch-detection` (McLeod method).
-//! NOTE: get_pitch runs an FFT and may allocate, so push is only approximately
-//! real-time-safe on hop boundaries (acceptable for v1).
+//! Detection (`get_pitch` runs an FFT and may allocate) happens on a worker
+//! thread; the audio thread only pushes samples into a lock-free ring and reads
+//! the latest published frequency via an atomic, so it stays RT-safe.
 
 use pitch_detection::detector::mcleod::McLeodDetector;
 use pitch_detection::detector::PitchDetector;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::Arc;
+use std::thread::JoinHandle;
 
 const WINDOW: usize = 2048;
 const PADDING: usize = WINDOW / 2;
@@ -44,11 +48,6 @@ impl PitchDetectorCore {
     pub(crate) fn set_sample_rate(&mut self, sample_rate: f32) {
         self.sample_rate = sample_rate as usize;
     }
-    pub(crate) fn reset(&mut self) {
-        self.ring.iter_mut().for_each(|s| *s = 0.0);
-        self.write = 0;
-        self.hop_counter = 0;
-    }
     pub(crate) fn push(&mut self, sample: f32) -> Option<Detection> {
         self.ring[self.write] = sample;
         self.write = (self.write + 1) % WINDOW;
@@ -72,6 +71,115 @@ impl PitchDetectorCore {
             Some(p) => Detection::Pitch(p.frequency),
             None => Detection::NoPitch,
         })
+    }
+}
+
+const RING_CAPACITY: usize = 8192;
+
+/// Threaded monophonic pitch tracker. The audio thread only pushes samples into
+/// a lock-free ring and reads the latest published frequency; the (possibly
+/// allocating) `get_pitch` runs on a worker thread. Naturally `Send`.
+pub struct PitchTracker {
+    producer: Option<rtrb::Producer<f32>>,
+    result: Arc<AtomicU32>, // bit-cast f32 latest frequency; NaN = no pitch
+    stop: Arc<AtomicBool>,
+    worker: Option<JoinHandle<()>>,
+    hop_counter: usize,
+    sample_rate: f32,
+}
+
+impl Default for PitchTracker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl PitchTracker {
+    pub fn new() -> Self {
+        Self {
+            producer: None,
+            result: Arc::new(AtomicU32::new(f32::NAN.to_bits())),
+            stop: Arc::new(AtomicBool::new(false)),
+            worker: None,
+            hop_counter: 0,
+            sample_rate: 48_000.0,
+        }
+    }
+
+    pub fn set_sample_rate(&mut self, sample_rate: f32) {
+        self.sample_rate = sample_rate;
+        self.spawn_worker();
+    }
+
+    fn spawn_worker(&mut self) {
+        self.stop_worker();
+        let (producer, mut consumer) = rtrb::RingBuffer::<f32>::new(RING_CAPACITY);
+        self.producer = Some(producer);
+        let result = self.result.clone();
+        let stop = self.stop.clone();
+        stop.store(false, Ordering::Relaxed);
+        let sr = self.sample_rate;
+        self.worker = Some(std::thread::spawn(move || {
+            // Detector CREATED here on the worker thread, so its !Send Rc
+            // internals never cross a thread boundary — no `unsafe` needed.
+            let mut core = PitchDetectorCore::new();
+            core.set_sample_rate(sr);
+            loop {
+                if stop.load(Ordering::Relaxed) {
+                    break;
+                }
+                let mut did_work = false;
+                while let Ok(sample) = consumer.pop() {
+                    did_work = true;
+                    if let Some(det) = core.push(sample) {
+                        let bits = match det {
+                            Detection::Pitch(f) => f.to_bits(),
+                            Detection::NoPitch => f32::NAN.to_bits(),
+                        };
+                        result.store(bits, Ordering::Relaxed);
+                    }
+                }
+                if !did_work {
+                    std::thread::sleep(std::time::Duration::from_micros(500));
+                }
+            }
+        }));
+    }
+
+    fn stop_worker(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(h) = self.worker.take() {
+            let _ = h.join();
+        }
+        self.producer = None;
+    }
+
+    pub fn reset(&mut self) {
+        self.hop_counter = 0;
+        self.result.store(f32::NAN.to_bits(), Ordering::Relaxed);
+    }
+
+    pub fn push(&mut self, sample: f32) -> Option<Detection> {
+        if let Some(p) = self.producer.as_mut() {
+            let _ = p.push(sample);
+        }
+        self.hop_counter += 1;
+        if self.hop_counter < HOP {
+            return None;
+        }
+        self.hop_counter = 0;
+        let f = f32::from_bits(self.result.load(Ordering::Relaxed));
+        Some(if f.is_nan() {
+            Detection::NoPitch
+        } else {
+            Detection::Pitch(f)
+        })
+    }
+}
+
+impl Drop for PitchTracker {
+    fn drop(&mut self) {
+        self.stop_worker();
     }
 }
 
@@ -110,5 +218,41 @@ mod tests {
             }
         }
         assert_eq!(got, Some(Detection::NoPitch));
+    }
+
+    #[test]
+    fn tracker_constructs_and_drops_cleanly() {
+        // Spawns a worker on set_sample_rate; Drop must join it without hanging.
+        let mut t = PitchTracker::new();
+        t.set_sample_rate(44_100.0);
+        t.reset();
+        drop(t);
+    }
+
+    #[test]
+    fn tracker_detects_a_sine_on_worker_thread() {
+        let sr = 44_100.0;
+        let freq = 220.0;
+        let mut t = PitchTracker::new();
+        t.set_sample_rate(sr);
+        let mut seen: Option<f32> = None;
+        // Feed generously (well beyond WINDOW*8) and periodically yield so the
+        // worker thread can drain the ring and publish a frequency.
+        for n in 0..(WINDOW * 16) {
+            let s = (TAU * freq * n as f32 / sr).sin();
+            if let Some(Detection::Pitch(f)) = t.push(s) {
+                if (f - freq).abs() < 3.0 {
+                    seen = Some(f);
+                    break;
+                }
+            }
+            if n % 2000 == 0 {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        }
+        assert!(
+            seen.is_some(),
+            "expected a pitch ~{freq} Hz from the worker thread"
+        );
     }
 }

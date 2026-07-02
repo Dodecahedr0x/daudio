@@ -6,3 +6,4 @@ license.workspace = true
 
 [dependencies]
 pitch-detection = "0.3"
+rtrb = "0.3"
