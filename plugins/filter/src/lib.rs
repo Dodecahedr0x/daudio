@@ -1,6 +1,6 @@
-pub mod core;
+pub mod dsp;
 
-use crate::core::FilterCore;
+use crate::dsp::FilterCore;
 use nih_plug::prelude::*;
 use std::sync::Arc;
 
@@ -88,7 +88,12 @@ impl Plugin for FilterPlugin {
     }
 
     fn reset(&mut self) {
+        // Clear filter state, then re-snap the gain smoother to the current
+        // target so a transport restart doesn't glide from a stale value.
+        // (FilterCore::reset only clears the biquads; the gain target lives in
+        // the param, which only the adapter can see — mirror `initialize`.)
         self.core.reset();
+        self.core.snap_gain(self.params.gain.value());
     }
 
     fn process(
@@ -97,6 +102,9 @@ impl Plugin for FilterPlugin {
         _aux: &mut AuxiliaryBuffers,
         _context: &mut impl ProcessContext<Self>,
     ) -> ProcessStatus {
+        // Cutoff is applied once per buffer (not smoothed) — a deliberate
+        // first-milestone tradeoff; fast cutoff automation may zipper at buffer
+        // boundaries. Add smoothing here if a later plugin needs it.
         self.core.set_cutoff(self.params.cutoff.value());
 
         // FilterCore's internal OnePole smooths toward this target, so pull the

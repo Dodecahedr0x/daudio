@@ -1,4 +1,10 @@
 //! The uniform per-sample processing contract for DSP blocks.
+//!
+//! Implement `Processor` for a type whose input and output are both a single
+//! audio sample (filters, waveshapers, delay lines). Types with a different
+//! contract — a smoother that ticks toward a *target* (see [`crate::smoother::OnePole`]),
+//! or a multi-channel composite (e.g. a plugin's stereo `FilterCore`) —
+//! deliberately expose bespoke methods instead of forcing an ill-fitting `f32 -> f32` shape.
 
 pub trait Processor {
     /// Called on init and whenever the host sample rate changes.
