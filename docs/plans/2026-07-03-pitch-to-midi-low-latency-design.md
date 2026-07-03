@@ -94,3 +94,21 @@ In `process_sample`, the plugin already holds the `Detection`; it now passes `cl
 One focused change set — `daudio-dsp` (window/hop/clarity), the trigger, and the plugin's
 `process_sample` wiring — verified by the tests above and a before/after latency read from the
 `demo` binary.
+
+## Results & notes (implemented 2026-07-03)
+
+- **Measured detection latency** (real-time-paced feed of a tone from onset, 1024 window):
+  C4 ~14.5 ms, A4 ~8.7 ms after onset (McLeod detects before the window fully fills). Adding the
+  trigger fast-path (~1 hop ≈ 3 ms for C4+) gives note-on ≈ **~18 ms**, vs the prior design's
+  ~69–88 ms (2× window + 40 ms debounce).
+- **Clarity is pitch-dependent at a fixed window.** McLeod NSDF clarity scales with the number
+  of periods inside the window, so at 1024 samples a *clean* low note reads low clarity
+  (C3 ≈ 0.68, ~2.7 Hz biased; C4 ≈ 0.83; A4 ≈ 0.90). Consequences:
+  - The design's original "clarity > 0.8 at C3" test target was **physically unachievable**;
+    the DSP test asserts C3 *detection by frequency* (±4 Hz) and asserts `clarity > 0.8` on **C4**.
+  - `CLARITY_FAST` was set to **0.8** (not 0.9): the fast-commit path engages ~C4 and up (the bulk
+    of voice/lead melody); C3-region notes fall back to the (now 25 ms) Hold debounce. This is
+    intended, not a limitation — a fixed clarity threshold can't uniformly gate all pitches.
+- The offline `run_analyzer` demo can't measure this (it feeds faster than real time, so the
+  worker-thread detector drops samples → 0 events). Verify latency live in the standalone, or via
+  a real-time-paced feed of the public `PitchTracker`.
