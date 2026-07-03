@@ -9,8 +9,11 @@ MIDI is emitted alongside it (route it to an instrument).
   nearest allowed note. Toggle labels relabel live when you change the root.
 - **Detection:** windowed monophonic pitch tracking (`daudio-dsp::PitchTracker`, McLeod method)
   on a worker thread, then a debounced, level-gated trigger with velocity from input level.
-- **Options:** Sensitivity (input gate), Hold (debounce), and optional Pitch Bend output
-  (tracks the detected pitch's deviation from the held note; off by default).
+- **Options:** Response (detection window/hop trade-off), Sensitivity (input gate), Confidence
+  (clarity), Hold (debounce), Max Jump (fast-commit guard), Bend Range, and **Bend Mode**
+  (Off / On / **Auto**). In Auto, a pitch change with continuous volume becomes a pitch-bend
+  instead of a new note, while a volume dip (re-articulation) retriggers — so slurs bend and
+  separate notes retrigger.
 - **Readout:** a live "in → out" display of the detected and emitted notes.
 - **SDK:** implemented via `DaudioAudioToMidi` (`midi_out = true`).
 

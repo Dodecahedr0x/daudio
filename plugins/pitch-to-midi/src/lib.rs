@@ -9,7 +9,7 @@ use daudio_ui::nih_plug_vizia;
 use daudio_ui::nih_plug_vizia::assets::fonts;
 use daudio_ui::nih_plug_vizia::vizia::vg;
 use daudio_ui::nih_plug_vizia::widgets::param_base::ParamWidgetBase;
-use daudio_ui::nih_plug_vizia::widgets::{ParamButton, ParamSlider, RawParamEvent};
+use daudio_ui::nih_plug_vizia::widgets::{ParamSlider, RawParamEvent};
 use daudio_ui::prelude::*;
 use std::cell::Cell;
 use std::sync::atomic::{AtomicI32, Ordering::Relaxed};
@@ -56,6 +56,30 @@ impl Response {
         }
     }
 }
+
+/// How pitch-bend output behaves.
+#[derive(Enum, PartialEq, Clone, Copy)]
+pub enum BendMode {
+    /// Never bend; every quantized note change retriggers.
+    Off,
+    /// Emit pitch-bend within the held note, but note changes still retrigger.
+    On,
+    /// Volume-gated: a quantized note change *bends* (no retrigger) when the
+    /// volume stayed continuous and the new note is within the bend range;
+    /// a volume dip (re-articulation) is a separate note.
+    Auto,
+}
+
+/// True when a quantized-note change should be treated as a bend rather than a
+/// new note: the volume stayed continuous (no dip) AND the new note is within the
+/// bend range of the held note. Encodes "volume should not decrease during a bend".
+fn is_bend(dipped: bool, held: u8, target: i32, bend_range: i32) -> bool {
+    !dipped && (target - held as i32).abs() <= bend_range
+}
+
+/// A hop-to-hop amplitude below `note_peak * DIP_RATIO` counts as a volume dip
+/// (re-articulation), i.e. a separate note rather than a bend. −6 dB.
+const DIP_RATIO: f32 = 0.5;
 
 /// Map a [`Root`] to its pitch-class 0..=11.
 pub fn root_pc(r: Root) -> u8 {
@@ -113,8 +137,8 @@ pub struct PitchToMidiParams {
     hold: FloatParam,
     #[id = "maxjump"]
     max_jump: IntParam,
-    #[id = "bend"]
-    pitch_bend: BoolParam,
+    #[id = "bendmode"]
+    bend_mode: EnumParam<BendMode>,
     #[id = "bendrange"]
     bend_range: IntParam,
     #[persist = "editor-state"]
@@ -164,7 +188,7 @@ impl Default for PitchToMidiParams {
             .with_unit(" ms"),
             max_jump: IntParam::new("Max Jump", 7, IntRange::Linear { min: 1, max: 12 })
                 .with_unit(" st"),
-            pitch_bend: BoolParam::new("Pitch Bend", false),
+            bend_mode: EnumParam::new("Bend Mode", BendMode::Off),
             bend_range: IntParam::new("Bend Range", 2, IntRange::Linear { min: 1, max: 12 })
                 .with_unit(" st"),
             editor_state: daudio_ui::editor_state(640, 500),
@@ -227,6 +251,13 @@ pub struct PitchToMidi {
     active_note: Option<u8>,
     /// Last pitch-bend value emitted, to avoid resending unchanged bends.
     last_bend: f32,
+    /// Max `|input|` seen in the current detection hop (reset each hop).
+    hop_peak: f32,
+    /// Max hop amplitude since the current note began (for dip detection).
+    note_peak: f32,
+    /// Whether the volume dipped below `note_peak * DIP_RATIO` during the held
+    /// note — marks a re-articulation, so the next pitch change is a new note.
+    dipped: bool,
     detected: Arc<AtomicI32>,
     output: Arc<AtomicI32>,
 }
@@ -242,6 +273,9 @@ impl Default for PitchToMidi {
             sample_rate: 44_100.0,
             active_note: None,
             last_bend: 0.5,
+            hop_peak: 0.0,
+            note_peak: 0.0,
+            dipped: false,
             detected: Arc::new(AtomicI32::new(-1)),
             output: Arc::new(AtomicI32::new(-1)),
         }
@@ -258,6 +292,9 @@ impl DaudioAudioToMidi for PitchToMidi {
         self.level = 0.0;
         self.active_note = None;
         self.last_bend = 0.5;
+        self.hop_peak = 0.0;
+        self.note_peak = 0.0;
+        self.dipped = false;
     }
 
     fn reset(&mut self) {
@@ -266,10 +303,15 @@ impl DaudioAudioToMidi for PitchToMidi {
         self.level = 0.0;
         self.active_note = None;
         self.last_bend = 0.5;
+        self.hop_peak = 0.0;
+        self.note_peak = 0.0;
+        self.dipped = false;
     }
 
     fn process_sample(&mut self, input: f32, timing: u32, emit: &mut dyn FnMut(NoteEvent<()>)) {
         self.level = input.abs().max(self.level * self.level_decay);
+        // Fast per-hop amplitude for volume-dip detection (Auto bend).
+        self.hop_peak = self.hop_peak.max(input.abs());
         if let Some(detection) = self.tracker.push(input) {
             let (window, hop) = self.params.response.value().window_hop();
             let confidence = self.params.confidence.value();
@@ -301,14 +343,43 @@ impl DaudioAudioToMidi for PitchToMidi {
             };
             let velocity = self.level.clamp(0.0, 1.0);
             self.output.store(target.unwrap_or(-1), Relaxed);
+
+            // Volume-dip tracking for Auto bend. `amp` is this hop's peak level;
+            // a drop below `note_peak * DIP_RATIO` since the note began marks a
+            // re-articulation (a separate note, not a bend).
+            let amp = self.hop_peak;
+            self.hop_peak = 0.0;
+            let mut target_for_trigger = target;
+            if let Some(held) = self.active_note {
+                self.note_peak = self.note_peak.max(amp);
+                if amp < self.note_peak * DIP_RATIO {
+                    self.dipped = true;
+                }
+                // Auto: a quantized change with continuous volume and within the
+                // bend range is a bend — feed the trigger the *held* note so it
+                // does not retrigger (the pitch-bend below expresses the move).
+                if self.params.bend_mode.value() == BendMode::Auto {
+                    if let Some(t) = target {
+                        if is_bend(self.dipped, held, t, self.params.bend_range.value()) {
+                            target_for_trigger = Some(held as i32);
+                        }
+                    }
+                }
+            }
+
             // Track the sounding note out of the closure: `on_hop` borrows
             // `self.trigger` mutably, so the closure captures a local mirror
             // instead of `self.active_note`, which we write back afterwards.
             let mut new_active = self.active_note;
-            self.trigger
-                .on_hop(target, clarity, velocity, &mut |action| match action {
+            let mut committed = false;
+            self.trigger.on_hop(
+                target_for_trigger,
+                clarity,
+                velocity,
+                &mut |action| match action {
                     NoteAction::On { note, velocity } => {
                         new_active = Some(note);
+                        committed = true;
                         emit(NoteEvent::NoteOn {
                             timing,
                             voice_id: None,
@@ -327,12 +398,19 @@ impl DaudioAudioToMidi for PitchToMidi {
                             velocity: 0.0,
                         });
                     }
-                });
+                },
+            );
             self.active_note = new_active;
+            // A fresh note-on starts the dip envelope clean for the new note.
+            if committed {
+                self.note_peak = amp;
+                self.dipped = false;
+            }
 
-            // Optional pitch bend: track the detected pitch relative to the
-            // held note over a +/-2 semitone range, resending only on change.
-            if self.params.pitch_bend.value() {
+            // Pitch bend (On or Auto): track the detected pitch relative to the
+            // held note over the bend range, resending only on change. In Auto
+            // this expresses the slide that was kept as a bend above.
+            if self.params.bend_mode.value() != BendMode::Off {
                 if let (Some(note), Detection::Pitch { freq: f, .. }) =
                     (self.active_note, detection)
                 {
@@ -622,11 +700,18 @@ fn build_editor(
                         DaudioData::<PitchToMidiParams>::params,
                         |p| &p.max_jump,
                     );
-                    ParamButton::new(cx, DaudioData::<PitchToMidiParams>::params, |p| {
-                        &p.pitch_bend
+                    VStack::new(cx, |cx| {
+                        Label::new(cx, "Bend Mode").class("daudio-label");
+                        ParamSlider::new(cx, DaudioData::<PitchToMidiParams>::params, |p| {
+                            &p.bend_mode
+                        })
+                        .width(Pixels(120.0));
                     })
-                    .child_top(Stretch(1.0))
-                    .child_bottom(Stretch(1.0));
+                    .height(Auto)
+                    .width(Auto)
+                    .row_between(Pixels(6.0))
+                    .child_left(Stretch(1.0))
+                    .child_right(Stretch(1.0));
                     ParamControl::new(
                         cx,
                         "Bend Range",
@@ -657,4 +742,29 @@ fn build_editor(
     .row_between(Pixels(14.0))
     .width(Percentage(100.0))
     .height(Percentage(100.0));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_bend;
+
+    #[test]
+    fn continuous_volume_small_step_is_a_bend() {
+        // No dip, new note within the bend range → treat as a bend.
+        assert!(is_bend(false, 60, 62, 2)); // whole step up, range 2
+        assert!(is_bend(false, 60, 58, 2)); // whole step down
+    }
+
+    #[test]
+    fn volume_dip_is_a_separate_note() {
+        // A re-articulation (dip) is never a bend, even for a small step.
+        assert!(!is_bend(true, 60, 62, 2));
+    }
+
+    #[test]
+    fn jump_beyond_range_is_a_separate_note() {
+        // Too far to bend even with continuous volume.
+        assert!(!is_bend(false, 60, 67, 2)); // 7 semis, range 2
+        assert!(is_bend(false, 60, 67, 7)); // but bendable with a wide range
+    }
 }
