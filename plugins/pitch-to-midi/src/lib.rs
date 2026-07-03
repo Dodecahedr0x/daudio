@@ -122,7 +122,7 @@ impl Default for PitchToMidiParams {
             .with_unit(" dB"),
             hold: FloatParam::new(
                 "Hold",
-                40.0,
+                25.0,
                 FloatRange::Linear {
                     min: 10.0,
                     max: 200.0,
@@ -238,15 +238,18 @@ impl DaudioAudioToMidi for PitchToMidi {
                 .set_hold(self.params.hold.value(), HOP as f32 / self.sample_rate);
             let threshold = daudio_dsp::gain::db_to_gain(self.params.sensitivity.value());
             let gated = self.level >= threshold;
-            let target = match detection {
-                Detection::Pitch { freq, .. } if gated => {
+            let (target, clarity) = match detection {
+                Detection::Pitch { freq, clarity } if gated => {
                     let midi = notes::freq_to_midi(freq);
                     self.detected.store(midi, Relaxed);
-                    notes::quantize(midi, self.params.root_pc(), self.params.degree_mask())
+                    (
+                        notes::quantize(midi, self.params.root_pc(), self.params.degree_mask()),
+                        clarity,
+                    )
                 }
                 _ => {
                     self.detected.store(-1, Relaxed);
-                    None
+                    (None, 0.0)
                 }
             };
             let velocity = self.level.clamp(0.0, 1.0);
@@ -256,7 +259,7 @@ impl DaudioAudioToMidi for PitchToMidi {
             // instead of `self.active_note`, which we write back afterwards.
             let mut new_active = self.active_note;
             self.trigger
-                .on_hop(target, velocity, &mut |action| match action {
+                .on_hop(target, clarity, velocity, &mut |action| match action {
                     NoteAction::On { note, velocity } => {
                         new_active = Some(note);
                         emit(NoteEvent::NoteOn {

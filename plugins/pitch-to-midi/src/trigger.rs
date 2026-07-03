@@ -5,6 +5,15 @@ pub enum NoteAction {
     Off { note: u8 },
 }
 
+/// A new candidate at or above this clarity commits without waiting out the Hold
+/// debounce — unless it is a large jump from the currently-held note. Clarity is
+/// pitch-dependent at a fixed window (fewer periods -> lower clarity), so this
+/// threshold intentionally gives the fast path to mid/high notes; low notes
+/// debounce via Hold.
+const CLARITY_FAST: f32 = 0.8;
+/// Max semitone distance from the held note for a fast (undebounced) commit.
+const FAST_MAX_JUMP: i32 = 7;
+
 pub struct Trigger {
     hold_hops: u32,
     active: Option<u8>,
@@ -38,7 +47,13 @@ impl Trigger {
         self.candidate_hops = 0;
     }
 
-    pub fn on_hop(&mut self, target: Option<i32>, velocity: f32, emit: &mut dyn FnMut(NoteAction)) {
+    pub fn on_hop(
+        &mut self,
+        target: Option<i32>,
+        clarity: f32,
+        velocity: f32,
+        emit: &mut dyn FnMut(NoteAction),
+    ) {
         if target.is_none() {
             if let Some(n) = self.active.take() {
                 emit(NoteAction::Off { note: n });
@@ -59,7 +74,14 @@ impl Trigger {
             self.candidate = Some(target);
             self.candidate_hops = 1;
         }
-        if self.candidate_hops >= self.hold_hops {
+
+        let near = match self.active {
+            Some(n) => (target - n as i32).abs() <= FAST_MAX_JUMP,
+            None => true,
+        };
+        let fast = clarity >= CLARITY_FAST && near;
+
+        if fast || self.candidate_hops >= self.hold_hops {
             if let Some(n) = self.active.take() {
                 emit(NoteAction::Off { note: n });
             }
@@ -75,49 +97,57 @@ impl Trigger {
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn collect(t: &mut Trigger, target: Option<i32>, vel: f32) -> Vec<NoteAction> {
+    fn collect(t: &mut Trigger, target: Option<i32>, clarity: f32, vel: f32) -> Vec<NoteAction> {
         let mut v = Vec::new();
-        t.on_hop(target, vel, &mut |a| v.push(a));
+        t.on_hop(target, clarity, vel, &mut |a| v.push(a));
         v
     }
     #[test]
-    fn debounce_blocks_one_hop_blip() {
+    fn high_clarity_commits_on_first_hop() {
         let mut t = Trigger::new();
-        assert!(collect(&mut t, Some(60), 0.8).is_empty());
-        assert!(collect(&mut t, Some(67), 0.8).is_empty());
         assert_eq!(
-            collect(&mut t, Some(67), 0.8),
+            collect(&mut t, Some(60), 0.95, 0.8),
             vec![NoteAction::On {
-                note: 67,
+                note: 60,
                 velocity: 0.8
             }]
         );
     }
     #[test]
-    fn gate_close_releases_active_note() {
+    fn low_clarity_still_debounces() {
         let mut t = Trigger::new();
-        collect(&mut t, Some(60), 0.8);
-        collect(&mut t, Some(60), 0.8);
+        assert!(collect(&mut t, Some(60), 0.5, 0.8).is_empty());
         assert_eq!(
-            collect(&mut t, None, 0.0),
-            vec![NoteAction::Off { note: 60 }]
+            collect(&mut t, Some(60), 0.5, 0.8),
+            vec![NoteAction::On {
+                note: 60,
+                velocity: 0.8
+            }]
         );
     }
     #[test]
-    fn note_change_sends_off_then_on() {
+    fn high_clarity_big_jump_from_held_note_debounces() {
         let mut t = Trigger::new();
-        collect(&mut t, Some(60), 0.8);
-        collect(&mut t, Some(60), 0.8);
-        collect(&mut t, Some(64), 0.9);
+        collect(&mut t, Some(60), 0.95, 0.8); // 60 committed immediately (no held note)
+        assert!(collect(&mut t, Some(72), 0.95, 0.8).is_empty()); // 12 semis -> debounce
         assert_eq!(
-            collect(&mut t, Some(64), 0.9),
+            collect(&mut t, Some(72), 0.95, 0.8),
             vec![
                 NoteAction::Off { note: 60 },
                 NoteAction::On {
-                    note: 64,
-                    velocity: 0.9
+                    note: 72,
+                    velocity: 0.8
                 }
             ]
+        );
+    }
+    #[test]
+    fn gate_close_releases_active_note() {
+        let mut t = Trigger::new();
+        collect(&mut t, Some(60), 0.95, 0.8);
+        assert_eq!(
+            collect(&mut t, None, 0.0, 0.0),
+            vec![NoteAction::Off { note: 60 }]
         );
     }
 }
