@@ -239,8 +239,8 @@ impl DaudioAudioToMidi for PitchToMidi {
             let threshold = daudio_dsp::gain::db_to_gain(self.params.sensitivity.value());
             let gated = self.level >= threshold;
             let target = match detection {
-                Detection::Pitch(f) if gated => {
-                    let midi = notes::freq_to_midi(f);
+                Detection::Pitch { freq, .. } if gated => {
+                    let midi = notes::freq_to_midi(freq);
                     self.detected.store(midi, Relaxed);
                     notes::quantize(midi, self.params.root_pc(), self.params.degree_mask())
                 }
@@ -283,7 +283,9 @@ impl DaudioAudioToMidi for PitchToMidi {
             // Optional pitch bend: track the detected pitch relative to the
             // held note over a +/-2 semitone range, resending only on change.
             if self.params.pitch_bend.value() {
-                if let (Some(note), Detection::Pitch(f)) = (self.active_note, detection) {
+                if let (Some(note), Detection::Pitch { freq: f, .. }) =
+                    (self.active_note, detection)
+                {
                     let value = daudio_dsp::notes::bend_value(f, note);
                     if (value - self.last_bend).abs() > 1e-4 {
                         emit(NoteEvent::MidiPitchBend {

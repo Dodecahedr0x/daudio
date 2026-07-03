@@ -5,20 +5,32 @@
 
 use pitch_detection::detector::mcleod::McLeodDetector;
 use pitch_detection::detector::PitchDetector;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;
 
-const WINDOW: usize = 2048;
+const WINDOW: usize = 1024;
 const PADDING: usize = WINDOW / 2;
-pub const HOP: usize = 256;
+pub const HOP: usize = 128;
 const POWER_THRESHOLD: f32 = 0.15;
 const CLARITY_THRESHOLD: f32 = 0.6;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Detection {
-    Pitch(f32),
+    Pitch { freq: f32, clarity: f32 },
     NoPitch,
+}
+
+/// Pack a detection frequency + clarity into one u64 so the audio thread reads a
+/// consistent pair with a single atomic load. A `NaN` frequency means "no pitch".
+fn pack(freq: f32, clarity: f32) -> u64 {
+    ((freq.to_bits() as u64) << 32) | (clarity.to_bits() as u64)
+}
+fn unpack(bits: u64) -> (f32, f32) {
+    (
+        f32::from_bits((bits >> 32) as u32),
+        f32::from_bits(bits as u32),
+    )
 }
 
 /// Synchronous core of the pitch tracker. Holds the (`!Send`, because
@@ -68,7 +80,10 @@ impl PitchDetectorCore {
             CLARITY_THRESHOLD,
         );
         Some(match pitch {
-            Some(p) => Detection::Pitch(p.frequency),
+            Some(p) => Detection::Pitch {
+                freq: p.frequency,
+                clarity: p.clarity,
+            },
             None => Detection::NoPitch,
         })
     }
@@ -81,7 +96,7 @@ const RING_CAPACITY: usize = 8192;
 /// allocating) `get_pitch` runs on a worker thread. Naturally `Send`.
 pub struct PitchTracker {
     producer: Option<rtrb::Producer<f32>>,
-    result: Arc<AtomicU32>, // bit-cast f32 latest frequency; NaN = no pitch
+    result: Arc<AtomicU64>, // packed (freq, clarity); NaN freq = no pitch
     stop: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
     hop_counter: usize,
@@ -98,7 +113,7 @@ impl PitchTracker {
     pub fn new() -> Self {
         Self {
             producer: None,
-            result: Arc::new(AtomicU32::new(f32::NAN.to_bits())),
+            result: Arc::new(AtomicU64::new(pack(f32::NAN, 0.0))),
             stop: Arc::new(AtomicBool::new(false)),
             worker: None,
             hop_counter: 0,
@@ -133,8 +148,8 @@ impl PitchTracker {
                     did_work = true;
                     if let Some(det) = core.push(sample) {
                         let bits = match det {
-                            Detection::Pitch(f) => f.to_bits(),
-                            Detection::NoPitch => f32::NAN.to_bits(),
+                            Detection::Pitch { freq, clarity } => pack(freq, clarity),
+                            Detection::NoPitch => pack(f32::NAN, 0.0),
                         };
                         result.store(bits, Ordering::Relaxed);
                     }
@@ -156,7 +171,7 @@ impl PitchTracker {
 
     pub fn reset(&mut self) {
         self.hop_counter = 0;
-        self.result.store(f32::NAN.to_bits(), Ordering::Relaxed);
+        self.result.store(pack(f32::NAN, 0.0), Ordering::Relaxed);
     }
 
     pub fn push(&mut self, sample: f32) -> Option<Detection> {
@@ -168,11 +183,11 @@ impl PitchTracker {
             return None;
         }
         self.hop_counter = 0;
-        let f = f32::from_bits(self.result.load(Ordering::Relaxed));
-        Some(if f.is_nan() {
+        let (freq, clarity) = unpack(self.result.load(Ordering::Relaxed));
+        Some(if freq.is_nan() {
             Detection::NoPitch
         } else {
-            Detection::Pitch(f)
+            Detection::Pitch { freq, clarity }
         })
     }
 }
@@ -187,25 +202,60 @@ impl Drop for PitchTracker {
 mod tests {
     use super::*;
     use std::f32::consts::TAU;
+    // Note: McLeod (NSDF) clarity scales with the number of periods inside the
+    // detection window, so at a short (1024) window low notes read a lower
+    // clarity than high notes. C3 (~131 Hz) fits only ~3 periods and reads
+    // clarity ~0.68, so we assert its frequency only; C4 (~262 Hz) fits ~6 and
+    // exercises the clarity plumbing honestly.
     #[test]
-    fn detects_a_sine_frequency() {
+    fn detects_c3_frequency() {
         let sr = 44_100.0;
-        let freq = 220.0;
+        let freq = 131.0; // C3
         let mut t = PitchDetectorCore::new();
         t.set_sample_rate(sr);
         let mut last = Detection::NoPitch;
-        for n in 0..(WINDOW * 4) {
+        for n in 0..(WINDOW * 8) {
             let s = (TAU * freq * n as f32 / sr).sin();
             if let Some(d) = t.push(s) {
                 last = d;
             }
         }
         match last {
-            Detection::Pitch(f) => {
-                assert!((f - freq).abs() < 3.0, "detected {f}, expected ~{freq}")
+            // Frequency only: ±4 Hz still rules out an octave error (~65 or ~262).
+            Detection::Pitch { freq: f, .. } => {
+                assert!((f - freq).abs() < 4.0, "detected {f}, expected ~{freq}");
             }
             Detection::NoPitch => panic!("expected a pitch"),
         }
+    }
+
+    #[test]
+    fn detects_c4_frequency_and_clarity() {
+        let sr = 44_100.0;
+        let freq = 261.63; // C4
+        let mut t = PitchDetectorCore::new();
+        t.set_sample_rate(sr);
+        let mut last = Detection::NoPitch;
+        for n in 0..(WINDOW * 8) {
+            let s = (TAU * freq * n as f32 / sr).sin();
+            if let Some(d) = t.push(s) {
+                last = d;
+            }
+        }
+        match last {
+            Detection::Pitch { freq: f, clarity } => {
+                assert!((f - freq).abs() < 3.0, "detected {f}, expected ~{freq}");
+                assert!(clarity > 0.8, "clarity {clarity} too low");
+            }
+            Detection::NoPitch => panic!("expected a pitch"),
+        }
+    }
+
+    #[test]
+    fn pack_unpack_roundtrips() {
+        let (f, c) = unpack(pack(261.63, 0.93));
+        assert!((f - 261.63).abs() < 1e-2 && (c - 0.93).abs() < 1e-3);
+        assert!(unpack(pack(f32::NAN, 0.0)).0.is_nan());
     }
     #[test]
     fn silence_is_no_pitch() {
@@ -240,7 +290,7 @@ mod tests {
         // worker thread can drain the ring and publish a frequency.
         for n in 0..(WINDOW * 16) {
             let s = (TAU * freq * n as f32 / sr).sin();
-            if let Some(Detection::Pitch(f)) = t.push(s) {
+            if let Some(Detection::Pitch { freq: f, .. }) = t.push(s) {
                 if (f - freq).abs() < 3.0 {
                     seen = Some(f);
                     break;
