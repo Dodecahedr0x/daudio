@@ -14,6 +14,9 @@ MIDI is emitted alongside it (route it to an instrument).
   (Off / On / **Auto**). In Auto, a pitch change with continuous volume becomes a pitch-bend
   instead of a new note, while a volume dip (re-articulation) retriggers — so slurs bend and
   separate notes retrigger.
+- **Dynamics:** output velocity is mapped from the input volume — Vel Floor/Vel Ceil set the
+  input dB window, Vel Min/Vel Max the output velocity range, and Curve shapes the response
+  (set Vel Min = Vel Max for fixed velocity).
 - **Readout:** a live "in → out" display of the detected and emitted notes.
 - **SDK:** implemented via `DaudioAudioToMidi` (`midi_out = true`).
 

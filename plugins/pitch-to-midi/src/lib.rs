@@ -81,6 +81,32 @@ fn is_bend(dipped: bool, held: u8, target: i32, bend_range: i32) -> bool {
 /// (re-articulation), i.e. a separate note rather than a bend. −6 dB.
 const DIP_RATIO: f32 = 0.5;
 
+/// Velocity response shaping. `curve` 0.5 = linear; below eases in (slow start,
+/// quiet stays quiet), above eases out (fast start, quiet lifts sooner).
+/// Endpoints are preserved (0→0, 1→1) for every curve.
+fn velocity_curve(t: f32, curve: f32) -> f32 {
+    let gamma = 2f32.powf((0.5 - curve) * 3.0); // 0.5 -> 1.0, 0 -> ~2.8, 1 -> ~0.35
+    t.clamp(0.0, 1.0).powf(gamma)
+}
+
+/// Map a linear input level to a MIDI velocity fraction (0..1) over an input dB
+/// window [`floor_db`, `ceil_db`] and an output range [`min_v`, `max_v`] (already
+/// normalized as velocity/127), shaped by `curve`. Encodes "velocity based on an
+/// input volume range".
+fn map_velocity(
+    level: f32,
+    floor_db: f32,
+    ceil_db: f32,
+    min_v: f32,
+    max_v: f32,
+    curve: f32,
+) -> f32 {
+    let db = daudio_dsp::gain::gain_to_db(level.max(1e-6));
+    let span = (ceil_db - floor_db).max(1e-3);
+    let t = ((db - floor_db) / span).clamp(0.0, 1.0);
+    (min_v + velocity_curve(t, curve) * (max_v - min_v)).clamp(0.0, 1.0)
+}
+
 /// Map a [`Root`] to its pitch-class 0..=11.
 pub fn root_pc(r: Root) -> u8 {
     match r {
@@ -141,6 +167,16 @@ pub struct PitchToMidiParams {
     bend_mode: EnumParam<BendMode>,
     #[id = "bendrange"]
     bend_range: IntParam,
+    #[id = "velfloor"]
+    vel_floor: FloatParam,
+    #[id = "velceil"]
+    vel_ceil: FloatParam,
+    #[id = "velmin"]
+    vel_min: IntParam,
+    #[id = "velmax"]
+    vel_max: IntParam,
+    #[id = "velcurve"]
+    vel_curve: FloatParam,
     #[persist = "editor-state"]
     editor_state: Arc<nih_plug_vizia::ViziaState>,
 }
@@ -191,7 +227,28 @@ impl Default for PitchToMidiParams {
             bend_mode: EnumParam::new("Bend Mode", BendMode::Off),
             bend_range: IntParam::new("Bend Range", 2, IntRange::Linear { min: 1, max: 12 })
                 .with_unit(" st"),
-            editor_state: daudio_ui::editor_state(640, 500),
+            vel_floor: FloatParam::new(
+                "Vel Floor",
+                -40.0,
+                FloatRange::Linear {
+                    min: -80.0,
+                    max: 0.0,
+                },
+            )
+            .with_unit(" dB"),
+            vel_ceil: FloatParam::new(
+                "Vel Ceil",
+                -6.0,
+                FloatRange::Linear {
+                    min: -60.0,
+                    max: 0.0,
+                },
+            )
+            .with_unit(" dB"),
+            vel_min: IntParam::new("Vel Min", 1, IntRange::Linear { min: 1, max: 127 }),
+            vel_max: IntParam::new("Vel Max", 127, IntRange::Linear { min: 1, max: 127 }),
+            vel_curve: FloatParam::new("Curve", 0.5, FloatRange::Linear { min: 0.0, max: 1.0 }),
+            editor_state: daudio_ui::editor_state(640, 680),
         }
     }
 }
@@ -341,7 +398,15 @@ impl DaudioAudioToMidi for PitchToMidi {
                     (None, 0.0)
                 }
             };
-            let velocity = self.level.clamp(0.0, 1.0);
+            // Velocity shaped from the input level over the user's dB window.
+            let velocity = map_velocity(
+                self.level,
+                self.params.vel_floor.value(),
+                self.params.vel_ceil.value(),
+                self.params.vel_min.value() as f32 / 127.0,
+                self.params.vel_max.value() as f32 / 127.0,
+                self.params.vel_curve.value(),
+            );
             self.output.store(target.unwrap_or(-1), Relaxed);
 
             // Volume-dip tracking for Auto bend. `amp` is this hop's peak level;
@@ -733,6 +798,42 @@ fn build_editor(
         .height(Auto)
         .width(Auto)
         .col_between(Pixels(14.0));
+
+        // Output note shaping: velocity mapped from the input volume range.
+        card_column(cx, "DYNAMICS", |cx| {
+            HStack::new(cx, |cx| {
+                ParamControl::new(
+                    cx,
+                    "Vel Floor",
+                    DaudioData::<PitchToMidiParams>::params,
+                    |p| &p.vel_floor,
+                );
+                ParamControl::new(
+                    cx,
+                    "Vel Ceil",
+                    DaudioData::<PitchToMidiParams>::params,
+                    |p| &p.vel_ceil,
+                );
+                ParamControl::new(
+                    cx,
+                    "Vel Min",
+                    DaudioData::<PitchToMidiParams>::params,
+                    |p| &p.vel_min,
+                );
+                ParamControl::new(
+                    cx,
+                    "Vel Max",
+                    DaudioData::<PitchToMidiParams>::params,
+                    |p| &p.vel_max,
+                );
+                ParamControl::new(cx, "Curve", DaudioData::<PitchToMidiParams>::params, |p| {
+                    &p.vel_curve
+                });
+            })
+            .height(Auto)
+            .width(Auto)
+            .col_between(Pixels(14.0));
+        });
     })
     .class("daudio-panel")
     // Guaranteed background even if the stylesheet fails to apply, so the editor
@@ -746,7 +847,45 @@ fn build_editor(
 
 #[cfg(test)]
 mod tests {
-    use super::is_bend;
+    use super::{is_bend, map_velocity, velocity_curve};
+
+    fn db_gain(db: f32) -> f32 {
+        10f32.powf(db / 20.0)
+    }
+
+    #[test]
+    fn velocity_maps_input_range_to_output_range() {
+        // At the ceiling → max; at the floor → min (linear curve).
+        let at_ceil = map_velocity(db_gain(-6.0), -40.0, -6.0, 0.2, 1.0, 0.5);
+        let at_floor = map_velocity(db_gain(-40.0), -40.0, -6.0, 0.2, 1.0, 0.5);
+        assert!((at_ceil - 1.0).abs() < 1e-3, "ceil -> {at_ceil}");
+        assert!((at_floor - 0.2).abs() < 1e-3, "floor -> {at_floor}");
+    }
+
+    #[test]
+    fn velocity_clamps_outside_the_window() {
+        // Louder than ceil clamps to max; quieter than floor clamps to min.
+        assert!((map_velocity(db_gain(0.0), -40.0, -6.0, 0.2, 1.0, 0.5) - 1.0).abs() < 1e-3);
+        assert!((map_velocity(db_gain(-80.0), -40.0, -6.0, 0.2, 1.0, 0.5) - 0.2).abs() < 1e-3);
+    }
+
+    #[test]
+    fn equal_min_max_is_fixed_velocity() {
+        // Vel Min == Vel Max → constant regardless of level.
+        for db in [-60.0, -30.0, -6.0, 0.0] {
+            let v = map_velocity(db_gain(db), -40.0, -6.0, 0.75, 0.75, 0.5);
+            assert!((v - 0.75).abs() < 1e-3, "db {db} -> {v}");
+        }
+    }
+
+    #[test]
+    fn linear_curve_is_identity_and_endpoints_preserved() {
+        assert!((velocity_curve(0.5, 0.5) - 0.5).abs() < 1e-6);
+        for curve in [0.0, 0.25, 0.5, 0.75, 1.0] {
+            assert!(velocity_curve(0.0, curve).abs() < 1e-6);
+            assert!((velocity_curve(1.0, curve) - 1.0).abs() < 1e-6);
+        }
+    }
 
     #[test]
     fn continuous_volume_small_step_is_a_bend() {
