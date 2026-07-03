@@ -5,17 +5,16 @@ pub enum NoteAction {
     Off { note: u8 },
 }
 
-/// A new candidate at or above this clarity commits without waiting out the Hold
-/// debounce — unless it is a large jump from the currently-held note. Clarity is
-/// pitch-dependent at a fixed window (fewer periods -> lower clarity), so this
-/// threshold intentionally gives the fast path to mid/high notes; low notes
-/// debounce via Hold.
-const CLARITY_FAST: f32 = 0.8;
-/// Max semitone distance from the held note for a fast (undebounced) commit.
-const FAST_MAX_JUMP: i32 = 7;
-
 pub struct Trigger {
     hold_hops: u32,
+    /// A new candidate at or above this clarity commits without waiting out the
+    /// Hold debounce — unless it is a large jump from the currently-held note.
+    /// Clarity is pitch-dependent at a fixed window (fewer periods -> lower
+    /// clarity), so this threshold intentionally gives the fast path to mid/high
+    /// notes; low notes debounce via Hold.
+    fast_clarity: f32,
+    /// Max semitone distance from the held note for a fast (undebounced) commit.
+    max_jump: i32,
     active: Option<u8>,
     candidate: Option<i32>,
     candidate_hops: u32,
@@ -31,6 +30,8 @@ impl Trigger {
     pub fn new() -> Self {
         Self {
             hold_hops: 2,
+            fast_clarity: 0.8,
+            max_jump: 7,
             active: None,
             candidate: None,
             candidate_hops: 0,
@@ -39,6 +40,14 @@ impl Trigger {
 
     pub fn set_hold(&mut self, hold_ms: f32, hop_seconds: f32) {
         self.hold_hops = ((hold_ms / 1000.0) / hop_seconds).ceil().max(1.0) as u32;
+    }
+
+    pub fn set_fast_clarity(&mut self, c: f32) {
+        self.fast_clarity = c;
+    }
+
+    pub fn set_max_jump(&mut self, j: i32) {
+        self.max_jump = j.max(0);
     }
 
     pub fn reset(&mut self) {
@@ -76,10 +85,10 @@ impl Trigger {
         }
 
         let near = match self.active {
-            Some(n) => (target - n as i32).abs() <= FAST_MAX_JUMP,
+            Some(n) => (target - n as i32).abs() <= self.max_jump,
             None => true,
         };
-        let fast = clarity >= CLARITY_FAST && near;
+        let fast = clarity >= self.fast_clarity && near;
 
         if fast || self.candidate_hops >= self.hold_hops {
             if let Some(n) = self.active.take() {
@@ -130,6 +139,37 @@ mod tests {
         let mut t = Trigger::new();
         collect(&mut t, Some(60), 0.95, 0.8); // 60 committed immediately (no held note)
         assert!(collect(&mut t, Some(72), 0.95, 0.8).is_empty()); // 12 semis -> debounce
+        assert_eq!(
+            collect(&mut t, Some(72), 0.95, 0.8),
+            vec![
+                NoteAction::Off { note: 60 },
+                NoteAction::On {
+                    note: 72,
+                    velocity: 0.8
+                }
+            ]
+        );
+    }
+    #[test]
+    fn raising_fast_clarity_forces_debounce() {
+        let mut t = Trigger::new();
+        t.set_fast_clarity(0.95);
+        // Clarity 0.9 is below the raised threshold, so it no longer fast-commits.
+        assert!(collect(&mut t, Some(60), 0.9, 0.8).is_empty());
+        assert_eq!(
+            collect(&mut t, Some(60), 0.9, 0.8),
+            vec![NoteAction::On {
+                note: 60,
+                velocity: 0.8
+            }]
+        );
+    }
+    #[test]
+    fn raising_max_jump_allows_big_fast_commit() {
+        let mut t = Trigger::new();
+        t.set_max_jump(12);
+        collect(&mut t, Some(60), 0.95, 0.8); // 60 committed immediately (no held note)
+                                              // 12 semis is within the raised max jump, so it fast-commits at high clarity.
         assert_eq!(
             collect(&mut t, Some(72), 0.95, 0.8),
             vec![

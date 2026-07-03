@@ -289,7 +289,7 @@ impl DaudioAudioToMidi for PitchToMidi {
                 if let (Some(note), Detection::Pitch { freq: f, .. }) =
                     (self.active_note, detection)
                 {
-                    let value = daudio_dsp::notes::bend_value(f, note);
+                    let value = daudio_dsp::notes::bend_value(f, note, 2.0);
                     if (value - self.last_bend).abs() > 1e-4 {
                         emit(NoteEvent::MidiPitchBend {
                             timing,

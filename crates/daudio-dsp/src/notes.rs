@@ -41,11 +41,11 @@ pub fn quantize(midi: i32, root: u8, degree_mask: u16) -> Option<i32> {
 }
 
 /// Normalized 14-bit-style pitch-bend value (0.0..=1.0, 0.5 = no bend) for a
-/// detected frequency relative to `note`, over a +/- 2 semitone range.
-pub fn bend_value(detected_hz: f32, note: u8) -> f32 {
+/// detected frequency relative to `note`, over a +/-`range_semitones` range.
+pub fn bend_value(detected_hz: f32, note: u8, range_semitones: f32) -> f32 {
     let note_freq = 440.0 * 2.0_f32.powf((note as f32 - 69.0) / 12.0);
     let dev_semitones = 12.0 * (detected_hz / note_freq).log2();
-    (0.5 + dev_semitones / 4.0).clamp(0.0, 1.0)
+    (0.5 + dev_semitones / (2.0 * range_semitones)).clamp(0.0, 1.0)
 }
 
 #[cfg(test)]
@@ -85,21 +85,31 @@ mod tests {
     }
     #[test]
     fn bend_center_on_exact_note() {
-        assert!((bend_value(440.0, 69) - 0.5).abs() < 1e-4);
+        assert!((bend_value(440.0, 69, 2.0) - 0.5).abs() < 1e-4);
     }
     #[test]
     fn bend_sharp_one_semitone() {
-        // +1 semitone (A#4 = 466.16 Hz) -> +0.25 -> 0.75.
-        assert!((bend_value(466.16, 69) - 0.75).abs() < 1e-2);
+        // +1 semitone (A#4 = 466.16 Hz) at range 2 -> +0.25 -> 0.75.
+        assert!((bend_value(466.16, 69, 2.0) - 0.75).abs() < 1e-2);
     }
     #[test]
     fn bend_flat_two_semitones_clamps_to_zero() {
-        // -2 semitones (G4 = 392.0 Hz) -> dev -2 -> 0.5 - 0.5 = 0.0.
-        assert!((bend_value(392.0, 69) - 0.0).abs() < 1e-2);
+        // -2 semitones (G4 = 392.0 Hz) at range 2 -> dev -2 -> 0.5 - 0.5 = 0.0.
+        assert!((bend_value(392.0, 69, 2.0) - 0.0).abs() < 1e-2);
     }
     #[test]
     fn bend_beyond_range_clamps_to_one() {
-        // +3 semitones (C5 = 523.25 Hz) -> clamped to 1.0.
-        assert!((bend_value(523.25, 69) - 1.0).abs() < 1e-4);
+        // +3 semitones (C5 = 523.25 Hz) at range 2 -> clamped to 1.0.
+        assert!((bend_value(523.25, 69, 2.0) - 1.0).abs() < 1e-4);
+    }
+    #[test]
+    fn bend_narrow_range_saturates() {
+        // +1 semitone at range 1 -> 0.5 + 0.5 = 1.0 (clamped).
+        assert!((bend_value(466.16, 69, 1.0) - 1.0).abs() < 1e-2);
+    }
+    #[test]
+    fn bend_wide_range_small_deviation() {
+        // +1 semitone at range 12 -> 0.5 + 1/24 ~= 0.5417.
+        assert!((bend_value(466.16, 69, 12.0) - 0.5417).abs() < 1e-2);
     }
 }
