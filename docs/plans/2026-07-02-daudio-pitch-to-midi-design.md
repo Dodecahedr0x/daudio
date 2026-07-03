@@ -44,10 +44,11 @@ decides.
 
 **New macro mode** `midi_out = true` on `#[daudio_plugin(...)]` generates a
 `Plugin` with:
-- `AUDIO_IO_LAYOUTS` = **stereo in / stereo out, audio passed through** (nih-plug
-  processes in place, so an input-only 0-output plugin has no buffer to read; we
-  pass the audio through untouched and emit MIDI alongside it),
-- `MIDI_OUTPUT = MidiConfig::Basic`,
+- `AUDIO_IO_LAYOUTS` = **mono in / stereo out** (an analyzer sums to mono anyway; a
+  mono main input matches a mono microphone and the standalone backend, which
+  requires the input device's channel count to match the plugin. nih-plug needs a
+  non-zero output, so we keep stereo out and emit MIDI alongside it),
+- `MIDI_OUTPUT = MidiConfig::MidiCCs` (allows pitch-bend as well as notes),
 - a `process` loop that sums each frame to mono, calls
   `process_sample(mono, timing, emit)`, forwards emitted events via
   `context.send_event(...)`, and leaves the audio frame unchanged.

@@ -224,9 +224,13 @@ pub fn daudio_plugin(attr: TokenStream, item: TokenStream) -> TokenStream {
                 const EMAIL: &'static str = #email_ts;
                 const VERSION: &'static str = env!("CARGO_PKG_VERSION");
 
+                // Mono input, stereo output. An analyzer sums to mono anyway, and
+                // a mono main input matches the common mono microphone/source (and
+                // the standalone backend, which requires the input device's channel
+                // count to match) while stereo output matches typical outputs.
                 const AUDIO_IO_LAYOUTS: &'static [::daudio_sdk::nih_plug::prelude::AudioIOLayout] =
                     &[::daudio_sdk::nih_plug::prelude::AudioIOLayout {
-                        main_input_channels: ::std::num::NonZeroU32::new(2),
+                        main_input_channels: ::std::num::NonZeroU32::new(1),
                         main_output_channels: ::std::num::NonZeroU32::new(2),
                         ..::daudio_sdk::nih_plug::prelude::AudioIOLayout::const_default()
                     }];
