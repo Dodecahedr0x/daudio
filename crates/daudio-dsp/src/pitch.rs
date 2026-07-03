@@ -5,15 +5,20 @@
 
 use pitch_detection::detector::mcleod::McLeodDetector;
 use pitch_detection::detector::PitchDetector;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;
 
-const WINDOW: usize = 1024;
-const PADDING: usize = WINDOW / 2;
-pub const HOP: usize = 128;
-const POWER_THRESHOLD: f32 = 0.15;
-const CLARITY_THRESHOLD: f32 = 0.6;
+/// Largest supported detection window. The ring is always this size, so a window
+/// change never resizes it — detection runs on the last `window` samples.
+pub const MAX_WINDOW: usize = 2048;
+pub const DEFAULT_WINDOW: usize = 1024;
+pub const DEFAULT_HOP: usize = 128;
+const DEFAULT_POWER: f32 = 0.15;
+const DEFAULT_CLARITY: f32 = 0.6;
+
+// TODO(Task 2): plugin should use the current hop
+pub const HOP: usize = DEFAULT_HOP;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Detection {
@@ -39,6 +44,10 @@ fn unpack(bits: u64) -> (f32, f32) {
 /// threaded `PitchTracker` constructs one on its worker thread.
 pub(crate) struct PitchDetectorCore {
     detector: McLeodDetector<f32>,
+    window: usize,
+    hop: usize,
+    power: f32,
+    clarity: f32,
     ring: Vec<f32>,
     scratch: Vec<f32>,
     write: usize,
@@ -47,38 +56,57 @@ pub(crate) struct PitchDetectorCore {
 }
 
 impl PitchDetectorCore {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(window: usize) -> Self {
+        let window = window.clamp(256, MAX_WINDOW);
         Self {
-            detector: McLeodDetector::new(WINDOW, PADDING),
-            ring: vec![0.0; WINDOW],
-            scratch: vec![0.0; WINDOW],
+            detector: McLeodDetector::new(window, window / 2),
+            window,
+            hop: DEFAULT_HOP,
+            power: DEFAULT_POWER,
+            clarity: DEFAULT_CLARITY,
+            ring: vec![0.0; MAX_WINDOW],
+            scratch: vec![0.0; MAX_WINDOW],
             write: 0,
             hop_counter: 0,
             sample_rate: 48_000,
         }
     }
-    pub(crate) fn set_sample_rate(&mut self, sample_rate: f32) {
-        self.sample_rate = sample_rate as usize;
+    pub(crate) fn set_sample_rate(&mut self, sr: f32) {
+        self.sample_rate = sr as usize;
+    }
+    pub(crate) fn set_window(&mut self, window: usize) {
+        let window = window.clamp(256, MAX_WINDOW);
+        if window != self.window {
+            self.window = window;
+            // Rebuild (allocates) — worker thread only.
+            self.detector = McLeodDetector::new(window, window / 2);
+        }
+    }
+    pub(crate) fn set_hop(&mut self, hop: usize) {
+        self.hop = hop.max(1);
+    }
+    pub(crate) fn set_thresholds(&mut self, power: f32, clarity: f32) {
+        self.power = power;
+        self.clarity = clarity;
     }
     pub(crate) fn push(&mut self, sample: f32) -> Option<Detection> {
         self.ring[self.write] = sample;
-        self.write = (self.write + 1) % WINDOW;
+        self.write = (self.write + 1) % MAX_WINDOW;
         self.hop_counter += 1;
-        if self.hop_counter < HOP {
+        if self.hop_counter < self.hop {
             return None;
         }
         self.hop_counter = 0;
-        // Reconstruct the window oldest -> newest. `write` points at the oldest
-        // sample (the slot about to be overwritten next).
-        let (head, tail) = self.ring.split_at(self.write);
-        self.scratch[..tail.len()].copy_from_slice(tail);
-        self.scratch[tail.len()..].copy_from_slice(head);
-        let pitch = self.detector.get_pitch(
-            &self.scratch,
-            self.sample_rate,
-            POWER_THRESHOLD,
-            CLARITY_THRESHOLD,
-        );
+        // Copy the last `window` samples (oldest -> newest) into scratch[..window].
+        // The newest sample is at (write-1); the window starts `window` samples back.
+        let start = (self.write + MAX_WINDOW - self.window) % MAX_WINDOW;
+        let first = (MAX_WINDOW - start).min(self.window);
+        self.scratch[..first].copy_from_slice(&self.ring[start..start + first]);
+        self.scratch[first..self.window].copy_from_slice(&self.ring[..self.window - first]);
+        let signal = &self.scratch[..self.window];
+        let pitch = self
+            .detector
+            .get_pitch(signal, self.sample_rate, self.power, self.clarity);
         Some(match pitch {
             Some(p) => Detection::Pitch {
                 freq: p.frequency,
@@ -101,6 +129,10 @@ pub struct PitchTracker {
     worker: Option<JoinHandle<()>>,
     hop_counter: usize,
     sample_rate: f32,
+    window: Arc<AtomicUsize>,
+    hop: Arc<AtomicUsize>,
+    power: Arc<AtomicU32>,
+    clarity: Arc<AtomicU32>,
 }
 
 impl Default for PitchTracker {
@@ -118,12 +150,27 @@ impl PitchTracker {
             worker: None,
             hop_counter: 0,
             sample_rate: 48_000.0,
+            window: Arc::new(AtomicUsize::new(DEFAULT_WINDOW)),
+            hop: Arc::new(AtomicUsize::new(DEFAULT_HOP)),
+            power: Arc::new(AtomicU32::new(DEFAULT_POWER.to_bits())),
+            clarity: Arc::new(AtomicU32::new(DEFAULT_CLARITY.to_bits())),
         }
     }
 
     pub fn set_sample_rate(&mut self, sample_rate: f32) {
         self.sample_rate = sample_rate;
         self.spawn_worker();
+    }
+
+    /// Update detection config. RT-safe (only atomic stores); the worker picks the
+    /// new values up and rebuilds its detector off the audio thread when `window`
+    /// changes.
+    pub fn set_config(&self, window: usize, hop: usize, power: f32, clarity: f32) {
+        self.window
+            .store(window.clamp(256, MAX_WINDOW), Ordering::Relaxed);
+        self.hop.store(hop.max(1), Ordering::Relaxed);
+        self.power.store(power.to_bits(), Ordering::Relaxed);
+        self.clarity.store(clarity.to_bits(), Ordering::Relaxed);
     }
 
     fn spawn_worker(&mut self) {
@@ -134,15 +181,26 @@ impl PitchTracker {
         let stop = self.stop.clone();
         stop.store(false, Ordering::Relaxed);
         let sr = self.sample_rate;
+        let window_atomic = self.window.clone();
+        let hop_atomic = self.hop.clone();
+        let power_atomic = self.power.clone();
+        let clarity_atomic = self.clarity.clone();
         self.worker = Some(std::thread::spawn(move || {
             // Detector CREATED here on the worker thread, so its !Send Rc
             // internals never cross a thread boundary — no `unsafe` needed.
-            let mut core = PitchDetectorCore::new();
+            let mut core = PitchDetectorCore::new(window_atomic.load(Ordering::Relaxed));
             core.set_sample_rate(sr);
             loop {
                 if stop.load(Ordering::Relaxed) {
                     break;
                 }
+                // Apply the latest config; rebuilds the detector only on change.
+                core.set_window(window_atomic.load(Ordering::Relaxed));
+                core.set_hop(hop_atomic.load(Ordering::Relaxed));
+                core.set_thresholds(
+                    f32::from_bits(power_atomic.load(Ordering::Relaxed)),
+                    f32::from_bits(clarity_atomic.load(Ordering::Relaxed)),
+                );
                 let mut did_work = false;
                 while let Ok(sample) = consumer.pop() {
                     did_work = true;
@@ -179,7 +237,8 @@ impl PitchTracker {
             let _ = p.push(sample);
         }
         self.hop_counter += 1;
-        if self.hop_counter < HOP {
+        let hop = self.hop.load(Ordering::Relaxed);
+        if self.hop_counter < hop {
             return None;
         }
         self.hop_counter = 0;
@@ -211,10 +270,10 @@ mod tests {
     fn detects_c3_frequency() {
         let sr = 44_100.0;
         let freq = 131.0; // C3
-        let mut t = PitchDetectorCore::new();
+        let mut t = PitchDetectorCore::new(DEFAULT_WINDOW);
         t.set_sample_rate(sr);
         let mut last = Detection::NoPitch;
-        for n in 0..(WINDOW * 8) {
+        for n in 0..(MAX_WINDOW * 8) {
             let s = (TAU * freq * n as f32 / sr).sin();
             if let Some(d) = t.push(s) {
                 last = d;
@@ -233,10 +292,10 @@ mod tests {
     fn detects_c4_frequency_and_clarity() {
         let sr = 44_100.0;
         let freq = 261.63; // C4
-        let mut t = PitchDetectorCore::new();
+        let mut t = PitchDetectorCore::new(DEFAULT_WINDOW);
         t.set_sample_rate(sr);
         let mut last = Detection::NoPitch;
-        for n in 0..(WINDOW * 8) {
+        for n in 0..(MAX_WINDOW * 8) {
             let s = (TAU * freq * n as f32 / sr).sin();
             if let Some(d) = t.push(s) {
                 last = d;
@@ -259,15 +318,54 @@ mod tests {
     }
     #[test]
     fn silence_is_no_pitch() {
-        let mut t = PitchDetectorCore::new();
+        let mut t = PitchDetectorCore::new(DEFAULT_WINDOW);
         t.set_sample_rate(44_100.0);
         let mut got = None;
-        for _ in 0..(WINDOW * 2) {
+        for _ in 0..(MAX_WINDOW * 2) {
             if let Some(d) = t.push(0.0) {
                 got = Some(d);
             }
         }
         assert_eq!(got, Some(Detection::NoPitch));
+    }
+
+    #[test]
+    fn detects_at_each_window() {
+        let sr = 44_100.0;
+        for (window, freq) in [(512usize, 440.0f32), (1024, 261.63), (2048, 131.0)] {
+            let mut c = PitchDetectorCore::new(window);
+            c.set_sample_rate(sr);
+            let mut last = Detection::NoPitch;
+            for n in 0..(window * 6) {
+                let s = (std::f32::consts::TAU * freq * n as f32 / sr).sin();
+                if let Some(d) = c.push(s) {
+                    last = d;
+                }
+            }
+            match last {
+                Detection::Pitch { freq: f, .. } => {
+                    assert!((f - freq).abs() < 4.0, "window {window}: {f} vs {freq}")
+                }
+                Detection::NoPitch => panic!("window {window}: expected a pitch"),
+            }
+        }
+    }
+
+    #[test]
+    fn runtime_window_change_keeps_detecting() {
+        let sr = 44_100.0;
+        let mut c = PitchDetectorCore::new(2048);
+        c.set_sample_rate(sr);
+        // switch to 512 mid-stream, then confirm a 440 Hz tone still detects
+        c.set_window(512);
+        let mut last = Detection::NoPitch;
+        for n in 0..(512 * 6) {
+            let s = (std::f32::consts::TAU * 440.0 * n as f32 / sr).sin();
+            if let Some(d) = c.push(s) {
+                last = d;
+            }
+        }
+        assert!(matches!(last, Detection::Pitch { freq, .. } if (freq - 440.0).abs() < 4.0));
     }
 
     #[test]
@@ -286,9 +384,9 @@ mod tests {
         let mut t = PitchTracker::new();
         t.set_sample_rate(sr);
         let mut seen: Option<f32> = None;
-        // Feed generously (well beyond WINDOW*8) and periodically yield so the
+        // Feed generously (well beyond MAX_WINDOW*8) and periodically yield so the
         // worker thread can drain the ring and publish a frequency.
-        for n in 0..(WINDOW * 16) {
+        for n in 0..(MAX_WINDOW * 16) {
             let s = (TAU * freq * n as f32 / sr).sin();
             if let Some(Detection::Pitch { freq: f, .. }) = t.push(s) {
                 if (f - freq).abs() < 3.0 {
