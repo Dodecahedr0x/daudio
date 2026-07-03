@@ -3,7 +3,7 @@
 pub mod trigger;
 
 use daudio_dsp::notes;
-use daudio_dsp::pitch::{Detection, PitchTracker, HOP};
+use daudio_dsp::pitch::{Detection, PitchTracker};
 use daudio_sdk::prelude::*;
 use daudio_ui::nih_plug_vizia;
 use daudio_ui::nih_plug_vizia::assets::fonts;
@@ -36,6 +36,25 @@ pub enum Root {
     #[name = "A#"]
     As,
     B,
+}
+
+/// Detection window/hop trade-off: latency vs how low a note it can track.
+#[derive(Enum, PartialEq, Clone, Copy)]
+pub enum Response {
+    Fast,     // 512 / 64  — lowest latency, lead/voice only
+    Balanced, // 1024 / 128 — default
+    Full,     // 2048 / 256 — reaches lower notes, more latency
+}
+
+impl Response {
+    /// (window, hop) for the detector.
+    pub fn window_hop(self) -> (usize, usize) {
+        match self {
+            Response::Fast => (512, 64),
+            Response::Balanced => (1024, 128),
+            Response::Full => (2048, 256),
+        }
+    }
 }
 
 /// Map a [`Root`] to its pitch-class 0..=11.
@@ -84,12 +103,20 @@ pub struct PitchToMidiParams {
     degree_10: BoolParam,
     #[id = "deg11"]
     degree_11: BoolParam,
+    #[id = "response"]
+    response: EnumParam<Response>,
     #[id = "sens"]
     sensitivity: FloatParam,
+    #[id = "confidence"]
+    confidence: FloatParam,
     #[id = "hold"]
     hold: FloatParam,
+    #[id = "maxjump"]
+    max_jump: IntParam,
     #[id = "bend"]
     pitch_bend: BoolParam,
+    #[id = "bendrange"]
+    bend_range: IntParam,
     #[persist = "editor-state"]
     editor_state: Arc<nih_plug_vizia::ViziaState>,
 }
@@ -111,6 +138,7 @@ impl Default for PitchToMidiParams {
             degree_9: BoolParam::new("Degree 9", true),
             degree_10: BoolParam::new("Degree 10", false),
             degree_11: BoolParam::new("Degree 11", true),
+            response: EnumParam::new("Response", Response::Balanced),
             sensitivity: FloatParam::new(
                 "Sensitivity",
                 -40.0,
@@ -120,6 +148,11 @@ impl Default for PitchToMidiParams {
                 },
             )
             .with_unit(" dB"),
+            confidence: FloatParam::new(
+                "Confidence",
+                0.6,
+                FloatRange::Linear { min: 0.0, max: 1.0 },
+            ),
             hold: FloatParam::new(
                 "Hold",
                 25.0,
@@ -129,8 +162,12 @@ impl Default for PitchToMidiParams {
                 },
             )
             .with_unit(" ms"),
+            max_jump: IntParam::new("Max Jump", 7, IntRange::Linear { min: 1, max: 12 })
+                .with_unit(" st"),
             pitch_bend: BoolParam::new("Pitch Bend", false),
-            editor_state: daudio_ui::editor_state(620, 430),
+            bend_range: IntParam::new("Bend Range", 2, IntRange::Linear { min: 1, max: 12 })
+                .with_unit(" st"),
+            editor_state: daudio_ui::editor_state(640, 500),
         }
     }
 }
@@ -234,8 +271,18 @@ impl DaudioAudioToMidi for PitchToMidi {
     fn process_sample(&mut self, input: f32, timing: u32, emit: &mut dyn FnMut(NoteEvent<()>)) {
         self.level = input.abs().max(self.level * self.level_decay);
         if let Some(detection) = self.tracker.push(input) {
+            let (window, hop) = self.params.response.value().window_hop();
+            let confidence = self.params.confidence.value();
+            // Sensitivity governs both the trigger level gate (below) and the
+            // detector's power gate — map its -60..0 dB range to a modest
+            // 0.02..0.30 energy gate.
+            let power =
+                0.02 + 0.28 * ((self.params.sensitivity.value() + 60.0) / 60.0).clamp(0.0, 1.0);
+            self.tracker.set_config(window, hop, power, confidence);
+            self.trigger.set_fast_clarity((confidence + 0.2).min(0.98));
+            self.trigger.set_max_jump(self.params.max_jump.value());
             self.trigger
-                .set_hold(self.params.hold.value(), HOP as f32 / self.sample_rate);
+                .set_hold(self.params.hold.value(), hop as f32 / self.sample_rate);
             let threshold = daudio_dsp::gain::db_to_gain(self.params.sensitivity.value());
             let gated = self.level >= threshold;
             let (target, clarity) = match detection {
@@ -289,7 +336,11 @@ impl DaudioAudioToMidi for PitchToMidi {
                 if let (Some(note), Detection::Pitch { freq: f, .. }) =
                     (self.active_note, detection)
                 {
-                    let value = daudio_dsp::notes::bend_value(f, note, 2.0);
+                    let value = daudio_dsp::notes::bend_value(
+                        f,
+                        note,
+                        self.params.bend_range.value() as f32,
+                    );
                     if (value - self.last_bend).abs() > 1e-4 {
                         emit(NoteEvent::MidiPitchBend {
                             timing,
@@ -530,21 +581,63 @@ fn build_editor(
 
         // Detection + readout side by side.
         HStack::new(cx, move |cx| {
-            card(cx, "DETECTION", |cx| {
-                ParamControl::new(
-                    cx,
-                    "Sensitivity",
-                    DaudioData::<PitchToMidiParams>::params,
-                    |p| &p.sensitivity,
-                );
-                ParamControl::new(cx, "Hold", DaudioData::<PitchToMidiParams>::params, |p| {
-                    &p.hold
-                });
-                ParamButton::new(cx, DaudioData::<PitchToMidiParams>::params, |p| {
-                    &p.pitch_bend
+            card_column(cx, "DETECTION", |cx| {
+                HStack::new(cx, |cx| {
+                    // Response selector (ParamSlider over the enum, like Root).
+                    VStack::new(cx, |cx| {
+                        Label::new(cx, "Response").class("daudio-label");
+                        ParamSlider::new(cx, DaudioData::<PitchToMidiParams>::params, |p| {
+                            &p.response
+                        })
+                        .width(Pixels(120.0));
+                    })
+                    .height(Auto)
+                    .width(Auto)
+                    .row_between(Pixels(6.0))
+                    .child_left(Stretch(1.0))
+                    .child_right(Stretch(1.0));
+                    ParamControl::new(
+                        cx,
+                        "Sensitivity",
+                        DaudioData::<PitchToMidiParams>::params,
+                        |p| &p.sensitivity,
+                    );
+                    ParamControl::new(
+                        cx,
+                        "Confidence",
+                        DaudioData::<PitchToMidiParams>::params,
+                        |p| &p.confidence,
+                    );
+                    ParamControl::new(cx, "Hold", DaudioData::<PitchToMidiParams>::params, |p| {
+                        &p.hold
+                    });
                 })
-                .child_top(Stretch(1.0))
-                .child_bottom(Stretch(1.0));
+                .height(Auto)
+                .width(Auto)
+                .col_between(Pixels(14.0));
+                HStack::new(cx, |cx| {
+                    ParamControl::new(
+                        cx,
+                        "Max Jump",
+                        DaudioData::<PitchToMidiParams>::params,
+                        |p| &p.max_jump,
+                    );
+                    ParamButton::new(cx, DaudioData::<PitchToMidiParams>::params, |p| {
+                        &p.pitch_bend
+                    })
+                    .child_top(Stretch(1.0))
+                    .child_bottom(Stretch(1.0));
+                    ParamControl::new(
+                        cx,
+                        "Bend Range",
+                        DaudioData::<PitchToMidiParams>::params,
+                        |p| &p.bend_range,
+                    );
+                })
+                .height(Auto)
+                .width(Auto)
+                .col_between(Pixels(14.0))
+                .child_top(Pixels(6.0));
             });
             // Readout: a draw()-based leaf reading the shared atomics every frame
             // (baseview redraws each frame; vizia timers are inert).
